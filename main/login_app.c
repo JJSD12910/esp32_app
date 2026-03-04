@@ -9,11 +9,12 @@
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "lvgl.h"
-
+LV_FONT_DECLARE(font_24_cn);
 #include "app_network.h"
 #include "user_config.h"
 
 static const char *TAG = "login_app";
+
 
 /* UI objects */
 static lv_obj_t *s_login_screen;
@@ -43,11 +44,20 @@ static char s_password_buf[64];
 /* Roller state */
 static int s_current_digit;
 
+static inline void set_cn_label_font(lv_obj_t *o)
+{
+    if (o)
+    {
+        lv_obj_set_style_text_font(o, &font_24_cn, LV_PART_MAIN);
+    }
+}
+
 static void login_app_update_status(const char *text)
 {
     if (s_status_label && text)
     {
         lv_label_set_text(s_status_label, text);
+        set_cn_label_font(s_status_label);
     }
 }
 
@@ -469,7 +479,11 @@ static void login_app_build_ui(void)
 
     s_account_ta = lv_textarea_create(left);
     lv_textarea_set_one_line(s_account_ta, true);
-    lv_textarea_set_placeholder_text(s_account_ta, "Account");
+    lv_textarea_set_placeholder_text(s_account_ta, "账号");
+    lv_obj_set_style_text_font(s_account_ta, &lv_font_montserrat_24, LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_account_ta, &font_24_cn, LV_PART_TEXTAREA_PLACEHOLDER);
+    lv_obj_clear_flag(s_account_ta, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(s_account_ta, LV_SCROLLBAR_MODE_OFF);
     lv_obj_set_height(s_account_ta, 48);
     lv_obj_set_width(s_account_ta, lv_pct(92));
     lv_obj_add_event_cb(s_account_ta, login_app_textarea_select_event, LV_EVENT_CLICKED, NULL);
@@ -477,7 +491,11 @@ static void login_app_build_ui(void)
     s_password_ta = lv_textarea_create(left);
     lv_textarea_set_one_line(s_password_ta, true);
     lv_textarea_set_password_mode(s_password_ta, true);
-    lv_textarea_set_placeholder_text(s_password_ta, "Password");
+    lv_textarea_set_placeholder_text(s_password_ta, "密码");
+    lv_obj_set_style_text_font(s_password_ta, &lv_font_montserrat_24, LV_PART_MAIN);
+    lv_obj_set_style_text_font(s_password_ta, &font_24_cn, LV_PART_TEXTAREA_PLACEHOLDER);
+    lv_obj_clear_flag(s_password_ta, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(s_password_ta, LV_SCROLLBAR_MODE_OFF);
     lv_obj_set_height(s_password_ta, 48);
     lv_obj_set_width(s_password_ta, lv_pct(92));
     lv_obj_add_event_cb(s_password_ta, login_app_textarea_select_event, LV_EVENT_CLICKED, NULL);
@@ -561,18 +579,21 @@ static void login_app_build_ui(void)
 
     s_ok_btn = lv_btn_create(right);
     lv_obj_add_event_cb(s_ok_btn, login_app_ok_event, LV_EVENT_CLICKED, NULL);
-    lv_label_create(s_ok_btn);
-    lv_label_set_text(lv_obj_get_child(s_ok_btn, -1), "OK");
+    lv_obj_t *ok_label = lv_label_create(s_ok_btn);
+    lv_label_set_text(ok_label, "确认");
+    set_cn_label_font(ok_label);
 
     s_del_btn = lv_btn_create(right);
     lv_obj_add_event_cb(s_del_btn, login_app_del_event, LV_EVENT_CLICKED, NULL);
-    lv_label_create(s_del_btn);
-    lv_label_set_text(lv_obj_get_child(s_del_btn, -1), "DEL");
+    lv_obj_t *del_label = lv_label_create(s_del_btn);
+    lv_label_set_text(del_label, "删除");
+    set_cn_label_font(del_label);
 
     s_signin_btn = lv_btn_create(right);
     lv_obj_add_event_cb(s_signin_btn, login_app_handle_submit, LV_EVENT_CLICKED, NULL);
-    lv_label_create(s_signin_btn);
-    lv_label_set_text(lv_obj_get_child(s_signin_btn, -1), "Sign In");
+    lv_obj_t *signin_label = lv_label_create(s_signin_btn);
+    lv_label_set_text(signin_label, "登录");
+    set_cn_label_font(signin_label);
     const int BTN_H = 44;
     lv_obj_set_width(s_ok_btn, lv_pct(90));
     lv_obj_set_width(s_del_btn, lv_pct(90));
@@ -592,7 +613,8 @@ static void login_app_build_ui(void)
     lv_textarea_set_text(s_password_ta, "");
 
     s_status_label = lv_label_create(s_login_screen);
-    lv_label_set_text(s_status_label, "Enter account and password");
+    lv_label_set_text(s_status_label, "输入账号和密码");
+    set_cn_label_font(s_status_label);
     lv_obj_set_style_text_color(s_status_label, lv_palette_main(LV_PALETTE_GREY), LV_PART_MAIN);
     lv_obj_set_width(s_status_label, lv_pct(100));
     lv_label_set_long_mode(s_status_label, LV_LABEL_LONG_WRAP);
@@ -606,7 +628,7 @@ void login_app_show(void)
         login_app_build_ui();
     }
     lv_scr_load(s_login_screen);
-    login_app_update_status("Enter account and password");
+    login_app_update_status("输入账号和密码");
 }
 
 void login_app_destroy(void)

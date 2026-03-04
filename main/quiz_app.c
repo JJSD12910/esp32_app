@@ -17,11 +17,21 @@
 
 #include "app_network.h"
 #include "user_config.h"
+LV_FONT_DECLARE(font_24_cn);
 
 /* ================= UI Font Aliases (Theme-based) ================= */
 #define UI_FONT_LARGE   lv_theme_get_font_large(NULL)
 #define UI_FONT_NORMAL  lv_theme_get_font_normal(NULL)
 #define UI_FONT_SMALL   lv_theme_get_font_small(NULL)
+
+/* Answer area font: prefer 20, fallback to 22, then theme large. */
+#if defined(LV_FONT_MONTSERRAT_20) && LV_FONT_MONTSERRAT_20
+#define QUIZ_ANSWER_FONT (&lv_font_montserrat_20)
+#elif defined(LV_FONT_MONTSERRAT_22) && LV_FONT_MONTSERRAT_22
+#define QUIZ_ANSWER_FONT (&lv_font_montserrat_22)
+#else
+#define QUIZ_ANSWER_FONT UI_FONT_LARGE
+#endif
 
 /* ================= Option highlight colors ================= */
 #define OPTION_TEXT_NORMAL_COLOR   lv_color_hex(0x333333)
@@ -116,6 +126,15 @@ static void quiz_show_results_screen(void);
 static void quiz_finish_and_upload(void);
 static void quiz_reset_server_result(void);
 static const quiz_question_t *quiz_find_question_by_id(const char *id);
+static void quiz_add_wrong_row(uint8_t qno, char your_c, char ans_c);
+
+static inline void quiz_set_cn_font_for_label(lv_obj_t *obj)
+{
+    if (obj)
+    {
+        lv_obj_set_style_text_font(obj, &font_24_cn, LV_PART_MAIN);
+    }
+}
 
 static void quiz_show_toast(const char *text, uint32_t duration_ms)
 {
@@ -149,6 +168,12 @@ static void quiz_show_toast(const char *text, uint32_t duration_ms)
         lv_timer_reset(s_toast_timer);
     }
     lv_timer_set_repeat_count(s_toast_timer, 1);
+}
+
+static void quiz_show_toast_cn(const char *text, uint32_t duration_ms)
+{
+    quiz_show_toast(text, duration_ms);
+    quiz_set_cn_font_for_label(s_toast_label);
 }
 
 static esp_err_t quiz_http_request(const char *path,
@@ -847,7 +872,7 @@ static void quiz_handle_view_results(lv_event_t *e)
     LV_UNUSED(e);
     if (!s_state.test_finished)
     {
-        quiz_show_toast("No test taken yet", 2000);
+        quiz_show_toast_cn("尚未进行测试", 2000);
         return;
     }
 
@@ -869,7 +894,7 @@ static void quiz_create_home_screen(void)
     lv_obj_set_style_bg_opa(row, LV_OPA_0, LV_PART_MAIN);
     lv_obj_set_style_pad_all(row, 10, LV_PART_MAIN);
 
-    static const char *btn_texts[3] = {"Download", "Start Test", "View Results"};
+    static const char *btn_texts[3] = {"下载", "开始测试", "查看成绩"};
     lv_event_cb_t handlers[3] = {quiz_handle_download, quiz_handle_start_test, quiz_handle_view_results};
     for (int i = 0; i < 3; i++)
     {
@@ -884,6 +909,7 @@ static void quiz_create_home_screen(void)
         lv_obj_t *lbl = lv_label_create(btn);
         lv_label_set_text(lbl, btn_texts[i]);
         lv_obj_set_style_text_font(lbl, UI_FONT_NORMAL, LV_PART_MAIN);
+        quiz_set_cn_font_for_label(lbl);
         lv_obj_center(lbl);
     }
 }
@@ -947,7 +973,7 @@ static void quiz_build_test_screen(void)
     lv_label_set_text(s_question_label, "Loading...");
 
     /* 鉁?瀛楀彿锛氶骞插湪杩欓噷璋?*/
-    lv_obj_set_style_text_font(s_question_label, UI_FONT_LARGE, 0);
+    lv_obj_set_style_text_font(s_question_label, QUIZ_ANSWER_FONT, 0);
 
     /* Right: progress label */
     s_progress_label = lv_label_create(q_row);
@@ -970,7 +996,7 @@ static void quiz_build_test_screen(void)
         lv_obj_set_style_pad_bottom(s_option_labels[i], 2, 0);
 
         /* 鉁?瀛楀彿锛氶€夐」鍦ㄨ繖閲岃皟 鈥斺€?浣犺鈥滃叏閮ㄥぇ瀛椻€濓紝杩欓噷鏀规垚 LARGE */
-        lv_obj_set_style_text_font(s_option_labels[i], UI_FONT_LARGE, 0);
+        lv_obj_set_style_text_font(s_option_labels[i], QUIZ_ANSWER_FONT, 0);
         lv_obj_set_style_text_color(s_option_labels[i], OPTION_TEXT_NORMAL_COLOR, 0);
     }
 
@@ -1031,7 +1057,7 @@ static void quiz_build_test_screen(void)
         lv_obj_t *lbl = lv_label_create(s_option_btns[i]);
         lv_label_set_text_fmt(lbl, "%c", 'A' + i);
         lv_obj_center(lbl);
-        lv_obj_set_style_text_font(lbl, UI_FONT_LARGE, 0);
+        lv_obj_set_style_text_font(lbl, QUIZ_ANSWER_FONT, 0);
     }
 
     /* Submit: 涓嶈 checked 鍙樿壊锛堜笉鍔?checkable/涓嶈缃?LV_STATE_CHECKED 鏍峰紡锛?*/
@@ -1046,9 +1072,58 @@ static void quiz_build_test_screen(void)
     lv_obj_add_event_cb(s_submit_btn, quiz_handle_submit, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *submit_lbl = lv_label_create(s_submit_btn);
-    lv_label_set_text(submit_lbl, "Submit");
+    lv_label_set_text(submit_lbl, "提交");
     lv_obj_center(submit_lbl);
     lv_obj_set_style_text_font(submit_lbl, UI_FONT_LARGE, 0);
+    quiz_set_cn_font_for_label(submit_lbl);
+}
+
+static void quiz_add_wrong_row(uint8_t qno, char your_c, char ans_c)
+{
+    lv_obj_t *row = lv_obj_create(s_result_scroll);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_width(row, LV_PCT(100));
+    lv_obj_set_height(row, LV_SIZE_CONTENT);
+
+    lv_obj_set_style_pad_all(row, 8, 0);
+    lv_obj_set_style_pad_gap(row, 8, 0);
+    lv_obj_set_style_radius(row, 10, 0);
+    lv_obj_set_style_bg_color(row, lv_color_hex(0xF6F7F9), 0);
+    lv_obj_set_style_bg_opa(row, LV_OPA_100, 0);
+    lv_obj_set_style_border_width(row, 1, 0);
+    lv_obj_set_style_border_color(row, lv_color_hex(0xE6E6E6), 0);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_CLICKABLE);
+
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row,
+                          LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+
+    lv_obj_t *q_lbl = lv_label_create(row);
+    lv_label_set_text_fmt(q_lbl, "Q%d", qno);
+    lv_obj_set_style_text_font(q_lbl, LV_FONT_DEFAULT, LV_PART_MAIN);
+    lv_obj_set_style_text_color(q_lbl, lv_color_hex(0x111111), 0);
+
+    lv_obj_t *your_key_lbl = lv_label_create(row);
+    lv_label_set_text(your_key_lbl, "你的：");
+    quiz_set_cn_font_for_label(your_key_lbl);
+    lv_obj_set_style_text_color(your_key_lbl, lv_color_hex(0x111111), 0);
+
+    lv_obj_t *your_val_lbl = lv_label_create(row);
+    lv_label_set_text_fmt(your_val_lbl, "%c", your_c);
+    lv_obj_set_style_text_font(your_val_lbl, LV_FONT_DEFAULT, LV_PART_MAIN);
+    lv_obj_set_style_text_color(your_val_lbl, lv_color_hex(0x111111), 0);
+
+    lv_obj_t *ans_key_lbl = lv_label_create(row);
+    lv_label_set_text(ans_key_lbl, "答案：");
+    quiz_set_cn_font_for_label(ans_key_lbl);
+    lv_obj_set_style_text_color(ans_key_lbl, lv_color_hex(0x111111), 0);
+
+    lv_obj_t *ans_val_lbl = lv_label_create(row);
+    lv_label_set_text_fmt(ans_val_lbl, "%c", ans_c);
+    lv_obj_set_style_text_font(ans_val_lbl, LV_FONT_DEFAULT, LV_PART_MAIN);
+    lv_obj_set_style_text_color(ans_val_lbl, lv_color_hex(0x111111), 0);
 }
 
 static void quiz_build_result_screen(void)
@@ -1105,8 +1180,9 @@ static void quiz_build_result_screen(void)
 
     /* ===== Title ===== */
     lv_obj_t *title = lv_label_create(s_result_scroll);
-    lv_label_set_text(title, "Result");
+    lv_label_set_text(title, "结果");
     lv_obj_set_style_text_font(title, UI_FONT_NORMAL, 0);
+    quiz_set_cn_font_for_label(title);
     lv_obj_set_style_text_color(title, lv_color_hex(0x111111), 0);
 
     /* ===== Summary row: Score / Accuracy / Time ===== */
@@ -1121,21 +1197,58 @@ static void quiz_build_result_screen(void)
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_bg_opa(sum_row, LV_OPA_TRANSP, 0);
     lv_obj_set_style_pad_all(sum_row, 0, 0);
+    lv_obj_set_style_pad_gap(sum_row, 14, 0);
 
-    lv_obj_t *score_lbl = lv_label_create(sum_row);
-    lv_label_set_text_fmt(score_lbl, "Score: %d/%d", show_score, show_total);
-    lv_obj_set_style_text_font(score_lbl, UI_FONT_LARGE, 0);
-    lv_obj_set_style_text_color(score_lbl, lv_color_hex(0x111111), 0);
+    lv_obj_t *score_item = lv_obj_create(sum_row);
+    lv_obj_clear_flag(score_item, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(score_item, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(score_item, 0, 0);
+    lv_obj_set_style_pad_all(score_item, 0, 0);
+    lv_obj_set_style_pad_gap(score_item, 4, 0);
+    lv_obj_set_flex_flow(score_item, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(score_item, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_t *score_key_lbl = lv_label_create(score_item);
+    lv_label_set_text(score_key_lbl, "得分：");
+    quiz_set_cn_font_for_label(score_key_lbl);
+    lv_obj_set_style_text_color(score_key_lbl, lv_color_hex(0x111111), 0);
+    lv_obj_t *score_val_lbl = lv_label_create(score_item);
+    lv_label_set_text_fmt(score_val_lbl, "%d/%d", show_score, show_total);
+    lv_obj_set_style_text_font(score_val_lbl, LV_FONT_DEFAULT, LV_PART_MAIN);
+    lv_obj_set_style_text_color(score_val_lbl, lv_color_hex(0x111111), 0);
 
-    lv_obj_t *acc_lbl = lv_label_create(sum_row);
-    lv_label_set_text_fmt(acc_lbl, "Acc: %d%%", acc);
-    lv_obj_set_style_text_font(acc_lbl, UI_FONT_LARGE, 0);
-    lv_obj_set_style_text_color(acc_lbl, lv_color_hex(0x111111), 0);
+    lv_obj_t *acc_item = lv_obj_create(sum_row);
+    lv_obj_clear_flag(acc_item, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(acc_item, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(acc_item, 0, 0);
+    lv_obj_set_style_pad_all(acc_item, 0, 0);
+    lv_obj_set_style_pad_gap(acc_item, 4, 0);
+    lv_obj_set_flex_flow(acc_item, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(acc_item, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_t *acc_key_lbl = lv_label_create(acc_item);
+    lv_label_set_text(acc_key_lbl, "正确率：");
+    quiz_set_cn_font_for_label(acc_key_lbl);
+    lv_obj_set_style_text_color(acc_key_lbl, lv_color_hex(0x111111), 0);
+    lv_obj_t *acc_val_lbl = lv_label_create(acc_item);
+    lv_label_set_text_fmt(acc_val_lbl, "%d%%", acc);
+    lv_obj_set_style_text_font(acc_val_lbl, LV_FONT_DEFAULT, LV_PART_MAIN);
+    lv_obj_set_style_text_color(acc_val_lbl, lv_color_hex(0x111111), 0);
 
-    lv_obj_t *time_lbl = lv_label_create(sum_row);
-    lv_label_set_text(time_lbl, "Time: --:--"); /* 鍗犱綅锛氬悗缁帴鐢ㄦ椂鍐嶆浛鎹?*/
-    lv_obj_set_style_text_font(time_lbl, UI_FONT_LARGE, 0);
-    lv_obj_set_style_text_color(time_lbl, lv_color_hex(0x111111), 0);
+    lv_obj_t *time_item = lv_obj_create(sum_row);
+    lv_obj_clear_flag(time_item, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(time_item, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(time_item, 0, 0);
+    lv_obj_set_style_pad_all(time_item, 0, 0);
+    lv_obj_set_style_pad_gap(time_item, 4, 0);
+    lv_obj_set_flex_flow(time_item, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(time_item, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_t *time_key_lbl = lv_label_create(time_item);
+    lv_label_set_text(time_key_lbl, "时间：");
+    quiz_set_cn_font_for_label(time_key_lbl);
+    lv_obj_set_style_text_color(time_key_lbl, lv_color_hex(0x111111), 0);
+    lv_obj_t *time_val_lbl = lv_label_create(time_item);
+    lv_label_set_text(time_val_lbl, "--:--");
+    lv_obj_set_style_text_font(time_val_lbl, LV_FONT_DEFAULT, LV_PART_MAIN);
+    lv_obj_set_style_text_color(time_val_lbl, lv_color_hex(0x111111), 0);
 
     /* ===== Correct / Wrong row ===== */
     lv_obj_t *cw_row = lv_obj_create(s_result_scroll);
@@ -1149,17 +1262,41 @@ static void quiz_build_result_screen(void)
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_bg_opa(cw_row, LV_OPA_TRANSP, 0);
     lv_obj_set_style_pad_all(cw_row, 0, 0);
-    lv_obj_set_style_pad_gap(cw_row, 18, 0);
+    lv_obj_set_style_pad_gap(cw_row, 12, 0);
 
-    lv_obj_t *c_lbl = lv_label_create(cw_row);
-    lv_label_set_text_fmt(c_lbl, "Correct: %d", show_score);
-    lv_obj_set_style_text_font(c_lbl, UI_FONT_NORMAL, 0);
-    lv_obj_set_style_text_color(c_lbl, lv_color_hex(0x1a7f37), 0);
+    lv_obj_t *c_item = lv_obj_create(cw_row);
+    lv_obj_clear_flag(c_item, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(c_item, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(c_item, 0, 0);
+    lv_obj_set_style_pad_all(c_item, 0, 0);
+    lv_obj_set_style_pad_gap(c_item, 4, 0);
+    lv_obj_set_flex_flow(c_item, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(c_item, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_t *c_key_lbl = lv_label_create(c_item);
+    lv_label_set_text(c_key_lbl, "正确数：");
+    quiz_set_cn_font_for_label(c_key_lbl);
+    lv_obj_set_style_text_color(c_key_lbl, lv_color_hex(0x1a7f37), 0);
+    lv_obj_t *c_val_lbl = lv_label_create(c_item);
+    lv_label_set_text_fmt(c_val_lbl, "%d", show_score);
+    lv_obj_set_style_text_font(c_val_lbl, LV_FONT_DEFAULT, LV_PART_MAIN);
+    lv_obj_set_style_text_color(c_val_lbl, lv_color_hex(0x1a7f37), 0);
 
-    lv_obj_t *w_lbl = lv_label_create(cw_row);
-    lv_label_set_text_fmt(w_lbl, "Wrong: %d", wrong_cnt);
-    lv_obj_set_style_text_font(w_lbl, UI_FONT_NORMAL, 0);
-    lv_obj_set_style_text_color(w_lbl, lv_color_hex(0xb42318), 0);
+    lv_obj_t *w_item = lv_obj_create(cw_row);
+    lv_obj_clear_flag(w_item, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(w_item, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(w_item, 0, 0);
+    lv_obj_set_style_pad_all(w_item, 0, 0);
+    lv_obj_set_style_pad_gap(w_item, 4, 0);
+    lv_obj_set_flex_flow(w_item, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(w_item, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_t *w_key_lbl = lv_label_create(w_item);
+    lv_label_set_text(w_key_lbl, "错误数：");
+    quiz_set_cn_font_for_label(w_key_lbl);
+    lv_obj_set_style_text_color(w_key_lbl, lv_color_hex(0xb42318), 0);
+    lv_obj_t *w_val_lbl = lv_label_create(w_item);
+    lv_label_set_text_fmt(w_val_lbl, "%d", wrong_cnt);
+    lv_obj_set_style_text_font(w_val_lbl, LV_FONT_DEFAULT, LV_PART_MAIN);
+    lv_obj_set_style_text_color(w_val_lbl, lv_color_hex(0xb42318), 0);
 
     /* ===== Divider ===== */
     lv_obj_t *divider = lv_obj_create(s_result_scroll);
@@ -1172,45 +1309,13 @@ static void quiz_build_result_screen(void)
 
     /* ===== Wrong list title ===== */
     lv_obj_t *wl_title = lv_label_create(s_result_scroll);
-    lv_label_set_text(wl_title, "Wrong list:");
+    lv_label_set_text(wl_title, "错题列表");
     lv_obj_set_style_text_font(wl_title, UI_FONT_NORMAL, 0);
+    quiz_set_cn_font_for_label(wl_title);
     lv_obj_set_style_text_color(wl_title, lv_color_hex(0x111111), 0);
 
     /* ===== Wrong list items (STATIC, no click) ===== */
     bool has_wrong = false;
-
-    /* Helper macro to create one static row */
-#define CREATE_WRONG_ROW(_qno, _your_c, _ans_c)                                      \
-    do                                                                              \
-    {                                                                               \
-        lv_obj_t *row = lv_obj_create(s_result_scroll);                             \
-        lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);                             \
-        lv_obj_set_width(row, LV_PCT(100));                                         \
-        lv_obj_set_height(row, LV_SIZE_CONTENT);                                    \
-                                                                                    \
-        lv_obj_set_style_pad_all(row, 8, 0);                                        \
-        lv_obj_set_style_radius(row, 10, 0);                                        \
-        lv_obj_set_style_bg_color(row, lv_color_hex(0xF6F7F9), 0);                  \
-        lv_obj_set_style_bg_opa(row, LV_OPA_100, 0);                                \
-        lv_obj_set_style_border_width(row, 1, 0);                                   \
-        lv_obj_set_style_border_color(row, lv_color_hex(0xE6E6E6), 0);              \
-                                                                                    \
-        /* 褰诲簳涓嶅彲鐐瑰嚮锛氶伩鍏嶈Е鍙戜换浣曟寜鍘?鐐瑰嚮閾捐矾 */                               \
-        lv_obj_clear_flag(row, LV_OBJ_FLAG_CLICKABLE);                              \
-                                                                                    \
-        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);                                \
-        lv_obj_set_flex_align(row,                                                  \
-                              LV_FLEX_ALIGN_SPACE_BETWEEN,                          \
-                              LV_FLEX_ALIGN_CENTER,                                 \
-                              LV_FLEX_ALIGN_CENTER);                                \
-                                                                                    \
-        lv_obj_t *left = lv_label_create(row);                                      \
-        lv_label_set_text_fmt(left, "Q%d   Your:%c  Ans:%c", (_qno), (_your_c), (_ans_c)); \
-        lv_obj_set_style_text_font(left, UI_FONT_NORMAL, 0);                        \
-        lv_obj_set_style_text_color(left, lv_color_hex(0x111111), 0);               \
-                                                                                    \
-                              \
-    } while (0)
 
     if (s_state.server_wrong_count > 0)
     {
@@ -1233,7 +1338,7 @@ static void quiz_build_result_screen(void)
             char your_c = (wrong->your >= 0 && wrong->your < QUIZ_OPTION_COUNT) ? ('A' + wrong->your) : '-';
             char ans_c  = (wrong->correct >= 0 && wrong->correct < QUIZ_OPTION_COUNT) ? ('A' + wrong->correct) : '-';
 
-            CREATE_WRONG_ROW(q_index + 1, your_c, ans_c);
+            quiz_add_wrong_row(q_index + 1, your_c, ans_c);
             has_wrong = true;
         }
     }
@@ -1252,18 +1357,17 @@ static void quiz_build_result_screen(void)
             char your_c = (your >= 0 && your < QUIZ_OPTION_COUNT) ? ('A' + your) : '-';
             char ans_c  = (corr >= 0 && corr < QUIZ_OPTION_COUNT) ? ('A' + corr) : '-';
 
-            CREATE_WRONG_ROW(i + 1, your_c, ans_c);
+            quiz_add_wrong_row(i + 1, your_c, ans_c);
             has_wrong = true;
         }
     }
 
-#undef CREATE_WRONG_ROW
-
     if (!has_wrong)
     {
         lv_obj_t *all_good = lv_label_create(s_result_scroll);
-        lv_label_set_text(all_good, "All answers correct!");
+        lv_label_set_text(all_good, "全部答对");
         lv_obj_set_style_text_font(all_good, UI_FONT_NORMAL, 0);
+        quiz_set_cn_font_for_label(all_good);
         lv_obj_set_style_text_color(all_good, lv_color_hex(0x1a7f37), 0);
     }
 
@@ -1292,8 +1396,9 @@ static void quiz_build_result_screen(void)
     lv_obj_add_event_cb(retry_btn, quiz_handle_start_test, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *retry_lbl = lv_label_create(retry_btn);
-    lv_label_set_text(retry_lbl, "Retry");
+    lv_label_set_text(retry_lbl, "重试");
     lv_obj_set_style_text_font(retry_lbl, UI_FONT_NORMAL, 0);
+    quiz_set_cn_font_for_label(retry_lbl);
     lv_obj_set_style_text_color(retry_lbl, lv_color_white(), 0);
     lv_obj_center(retry_lbl);
 
@@ -1307,8 +1412,9 @@ static void quiz_build_result_screen(void)
     lv_obj_add_event_cb(back_btn, quiz_back_to_home, LV_EVENT_CLICKED, NULL);
 
     lv_obj_t *back_lbl = lv_label_create(back_btn);
-    lv_label_set_text(back_lbl, "Back");
+    lv_label_set_text(back_lbl, "返回");
     lv_obj_set_style_text_font(back_lbl, UI_FONT_NORMAL, 0);
+    quiz_set_cn_font_for_label(back_lbl);
     lv_obj_set_style_text_color(back_lbl, lv_color_hex(0x111111), 0);
     lv_obj_center(back_lbl);
 }
@@ -1506,7 +1612,7 @@ static void quiz_finish_and_upload(void)
     free(payload);
     if (err == ESP_OK)
     {
-        quiz_show_toast("Results uploaded. View results from home.", 1800);
+        quiz_show_toast_cn("结果已上传，请在主页查看", 1800);
         if (s_home_screen)
         {
             lv_scr_load(s_home_screen);
@@ -1570,7 +1676,7 @@ static void quiz_handle_submit(lv_event_t *e)
 
     if (s_state.answers[idx] >= QUIZ_OPTION_COUNT)
     {
-        quiz_show_toast("Select an option", 1600);
+        quiz_show_toast_cn("请选择一个选项", 1600);
         return;
     }
 
@@ -1664,4 +1770,3 @@ static const quiz_question_t *quiz_find_question_by_id(const char *id)
     }
     return NULL;
 }
-
