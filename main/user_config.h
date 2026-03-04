@@ -98,4 +98,12 @@
 #define APP_API_SUBMIT_PATH "/submit"
 #endif
 
+#ifndef APP_API_ATTEMPT_ANSWER_PATH_FMT
+#define APP_API_ATTEMPT_ANSWER_PATH_FMT "/api/client/attempts/%s/answers"
+#endif
+
+#ifndef APP_SINGLE_ANSWER_RETRY_COUNT
+#define APP_SINGLE_ANSWER_RETRY_COUNT 2
+#endif
+
 #endif
