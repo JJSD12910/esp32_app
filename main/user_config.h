@@ -67,15 +67,15 @@
 
 /* Network and server config */
 #ifndef APP_WIFI_SSID
-#define APP_WIFI_SSID "JD"
+#define APP_WIFI_SSID "16517yyds"
 #endif
 
 #ifndef APP_WIFI_PASS
-#define APP_WIFI_PASS "123456789"
+#define APP_WIFI_PASS "15172052448"
 #endif
 
 #ifndef APP_SERVER_HOST
-#define APP_SERVER_HOST "10.247.52.86"
+#define APP_SERVER_HOST "192.168.31.201"
 #endif
 
 #ifndef APP_SERVER_PORT
@@ -96,6 +96,14 @@
 
 #ifndef APP_API_SUBMIT_PATH
 #define APP_API_SUBMIT_PATH "/submit"
+#endif
+
+#ifndef APP_API_ATTEMPT_ANSWER_PATH_FMT
+#define APP_API_ATTEMPT_ANSWER_PATH_FMT "/api/client/attempts/%s/answers"
+#endif
+
+#ifndef APP_SINGLE_ANSWER_RETRY_COUNT
+#define APP_SINGLE_ANSWER_RETRY_COUNT 2
 #endif
 
 #endif

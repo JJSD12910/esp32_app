@@ -379,12 +379,12 @@ static void login_app_handle_submit(lv_event_t *e)
 
     if (!account || account[0] == '\0' || !password || password[0] == '\0')
     {
-        login_app_update_status("Account or password empty");
+        login_app_update_status("???????");
         return;
     }
 
     login_app_set_loading(true);
-    login_app_update_status("Signing in...");
+    login_app_update_status("????...");
 
     int http_status = 0;
     char token[192] = {0};
@@ -394,7 +394,7 @@ static void login_app_handle_submit(lv_event_t *e)
 
     if (err != ESP_OK)
     {
-        login_app_update_status("Network request failed");
+        login_app_update_status("??????");
         if (s_result_cb)
         {
             s_result_cb(false, NULL, NULL);
@@ -406,7 +406,7 @@ static void login_app_handle_submit(lv_event_t *e)
     {
         if (token[0] == '\0')
         {
-            login_app_update_status("Login succeeded but token missing");
+            login_app_update_status("??????????");
             ESP_LOGE(TAG, "Login succeeded but token is empty");
             if (s_result_cb)
             {
@@ -415,7 +415,7 @@ static void login_app_handle_submit(lv_event_t *e)
             return;
         }
 
-        login_app_update_status("Login successful");
+        login_app_update_status("????");
         if (s_result_cb)
         {
             s_result_cb(true, token, account);
@@ -423,7 +423,7 @@ static void login_app_handle_submit(lv_event_t *e)
     }
     else if (http_status == 401)
     {
-        login_app_update_status("Invalid account or password");
+        login_app_update_status("???????");
         s_account_buf[0] = '\0';
         s_password_buf[0] = '\0';
         if (s_account_ta)
@@ -441,7 +441,7 @@ static void login_app_handle_submit(lv_event_t *e)
     }
     else
     {
-        login_app_update_status("Login failed");
+        login_app_update_status("????");
         if (s_result_cb)
         {
             s_result_cb(false, NULL, NULL);

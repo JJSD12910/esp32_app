@@ -62,10 +62,14 @@ typedef struct
 {
     quiz_question_t questions[QUIZ_MAX_QUESTIONS];
     uint8_t answers[QUIZ_MAX_QUESTIONS];
+    uint8_t submitted_answers[QUIZ_MAX_QUESTIONS];
     uint8_t question_count;
     uint8_t current_question;
     bool questions_ready;
     bool test_finished;
+    bool submit_inflight;
+    bool final_submit_success;
+    TickType_t attempt_started_tick;
     int server_score;
     int server_total;
     uint8_t server_wrong_count;
@@ -97,6 +101,7 @@ static lv_obj_t *s_option_labels[QUIZ_OPTION_COUNT];
 static lv_obj_t *s_bottom_bar;
 static lv_obj_t *s_option_btns[QUIZ_OPTION_COUNT];
 static lv_obj_t *s_submit_btn;
+static lv_obj_t *s_submit_label;
 
 /* toast */
 static lv_obj_t *s_toast_label;
@@ -110,6 +115,7 @@ static void quiz_handle_submit(lv_event_t *e);
 static void quiz_hide_toast_cb(lv_timer_t *t);
 static void quiz_back_to_home(lv_event_t *e);
 static esp_err_t quiz_http_get_questions(char **out_json, int *out_status, char *out_reason, size_t out_reason_size);
+static esp_err_t quiz_http_post_single_answer(const char *payload, int *out_status, char *out_reason, size_t out_reason_size);
 static esp_err_t quiz_http_post_results(const char *payload, int *out_status, char *out_reason, size_t out_reason_size);
 static esp_err_t quiz_http_request(const char *path,
                                    esp_http_client_method_t method,
@@ -119,7 +125,13 @@ static esp_err_t quiz_http_request(const char *path,
                                    char **out_body);
 static bool quiz_pick_first_exam_id(const char *json, char *exam_id, size_t exam_id_size);
 static bool quiz_extract_error_reason(const char *json, char *out_reason, size_t out_reason_size);
+static char *quiz_build_single_answer_payload(uint8_t question_index, bool is_final_question);
 static char *quiz_build_submit_payload(void);
+static uint32_t quiz_get_elapsed_duration_sec(void);
+static bool quiz_submit_question_answer(uint8_t question_index, bool is_final_question);
+static void quiz_set_submit_loading(bool loading);
+static void quiz_update_submit_button_text(uint8_t index);
+static void quiz_prepare_local_result(void);
 static void quiz_load_question(uint8_t index);
 static void quiz_build_result_screen(void);
 static void quiz_show_results_screen(void);
@@ -149,7 +161,7 @@ static void quiz_show_toast(const char *text, uint32_t duration_ms)
         lv_obj_set_style_bg_opa(s_toast_label, LV_OPA_70, LV_PART_MAIN);
         lv_obj_set_style_bg_color(s_toast_label, lv_color_black(), LV_PART_MAIN);
         lv_obj_set_style_text_color(s_toast_label, lv_color_white(), LV_PART_MAIN);
-        lv_obj_set_style_text_font(s_toast_label, UI_FONT_NORMAL, LV_PART_MAIN);
+        lv_obj_set_style_text_font(s_toast_label, &font_24_cn, LV_PART_MAIN);
         lv_obj_set_style_pad_all(s_toast_label, 10, LV_PART_MAIN);
         lv_obj_set_style_radius(s_toast_label, 10, LV_PART_MAIN);
     }
@@ -174,6 +186,36 @@ static void quiz_show_toast_cn(const char *text, uint32_t duration_ms)
 {
     quiz_show_toast(text, duration_ms);
     quiz_set_cn_font_for_label(s_toast_label);
+}
+
+static void quiz_set_submit_loading(bool loading)
+{
+    // Avoid LVGL disabled-state transitions here. On this target/theme they can
+    // trigger transition animation crashes when toggled around blocking network IO.
+    s_state.submit_inflight = loading;
+}
+
+static void quiz_update_submit_button_text(uint8_t index)
+{
+    if (!s_submit_label)
+    {
+        return;
+    }
+
+    lv_label_set_text(s_submit_label,
+                      (index + 1 >= s_state.question_count) ? "??" : "???");
+    quiz_set_cn_font_for_label(s_submit_label);
+}
+
+static uint32_t quiz_get_elapsed_duration_sec(void)
+{
+    if (s_state.attempt_started_tick == 0)
+    {
+        return 0;
+    }
+
+    TickType_t elapsed_ticks = xTaskGetTickCount() - s_state.attempt_started_tick;
+    return (uint32_t)(elapsed_ticks / configTICK_RATE_HZ);
 }
 
 static esp_err_t quiz_http_request(const char *path,
@@ -410,7 +452,7 @@ static esp_err_t quiz_http_get_questions(char **out_json, int *out_status, char 
     if (s_auth_token[0] == '\0')
     {
         *out_status = 401;
-        strncpy(out_reason, "Login token missing, please log in again", out_reason_size - 1);
+        strncpy(out_reason, "????????????", out_reason_size - 1);
         out_reason[out_reason_size - 1] = '\0';
         return ESP_ERR_INVALID_STATE;
     }
@@ -434,7 +476,7 @@ static esp_err_t quiz_http_get_questions(char **out_json, int *out_status, char 
         *out_status = list_status;
         if (!quiz_extract_error_reason(list_json, out_reason, out_reason_size))
         {
-            strncpy(out_reason, "Download failed", out_reason_size - 1);
+            strncpy(out_reason, "????", out_reason_size - 1);
             out_reason[out_reason_size - 1] = '\0';
         }
         free(list_json);
@@ -445,7 +487,7 @@ static esp_err_t quiz_http_get_questions(char **out_json, int *out_status, char 
     if (!quiz_pick_first_exam_id(list_json, exam_id, sizeof(exam_id)))
     {
         *out_status = 404;
-        strncpy(out_reason, "No available exam / exam not found", out_reason_size - 1);
+        strncpy(out_reason, "???????????", out_reason_size - 1);
         out_reason[out_reason_size - 1] = '\0';
         free(list_json);
         return ESP_FAIL;
@@ -478,7 +520,7 @@ static esp_err_t quiz_http_get_questions(char **out_json, int *out_status, char 
     {
         if (!quiz_extract_error_reason(start_json, out_reason, out_reason_size))
         {
-            strncpy(out_reason, "Download failed", out_reason_size - 1);
+            strncpy(out_reason, "????", out_reason_size - 1);
             out_reason[out_reason_size - 1] = '\0';
         }
         free(start_json);
@@ -486,6 +528,70 @@ static esp_err_t quiz_http_get_questions(char **out_json, int *out_status, char 
     }
 
     *out_json = start_json;
+    return ESP_OK;
+}
+
+static esp_err_t quiz_http_post_single_answer(const char *payload, int *out_status, char *out_reason, size_t out_reason_size)
+{
+    if (!payload || !out_status || !out_reason || out_reason_size == 0)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *out_status = 0;
+    out_reason[0] = '\0';
+
+    if (s_auth_token[0] == '\0')
+    {
+        *out_status = 401;
+        strncpy(out_reason, "????????????", out_reason_size - 1);
+        out_reason[out_reason_size - 1] = '\0';
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (s_attempt_id[0] == '\0')
+    {
+        *out_status = 404;
+        strncpy(out_reason, "????????????", out_reason_size - 1);
+        out_reason[out_reason_size - 1] = '\0';
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    char answer_path[160];
+    snprintf(answer_path, sizeof(answer_path), APP_API_ATTEMPT_ANSWER_PATH_FMT, s_attempt_id);
+
+    char *resp_json = NULL;
+    esp_err_t err = quiz_http_request(answer_path,
+                                      HTTP_METHOD_POST,
+                                      s_auth_token,
+                                      payload,
+                                      out_status,
+                                      &resp_json);
+    if (err != ESP_OK)
+    {
+        return err;
+    }
+
+    ESP_LOGI(TAG, "Single answer submit status=%d attempt_id=%s", *out_status, s_attempt_id);
+    if (*out_status < 200 || *out_status >= 300)
+    {
+        if (!quiz_extract_error_reason(resp_json, out_reason, out_reason_size))
+        {
+            if (resp_json && resp_json[0] != '\0')
+            {
+                strncpy(out_reason, resp_json, out_reason_size - 1);
+                out_reason[out_reason_size - 1] = '\0';
+            }
+            else
+            {
+                strncpy(out_reason, "??????", out_reason_size - 1);
+                out_reason[out_reason_size - 1] = '\0';
+            }
+        }
+        free(resp_json);
+        return ESP_FAIL;
+    }
+
+    free(resp_json);
     return ESP_OK;
 }
 
@@ -501,7 +607,7 @@ static esp_err_t quiz_http_post_results(const char *payload, int *out_status, ch
     if (s_auth_token[0] == '\0')
     {
         *out_status = 401;
-        strncpy(out_reason, "Login token missing, please log in again", out_reason_size - 1);
+        strncpy(out_reason, "????????????", out_reason_size - 1);
         out_reason[out_reason_size - 1] = '\0';
         return ESP_ERR_INVALID_STATE;
     }
@@ -509,7 +615,7 @@ static esp_err_t quiz_http_post_results(const char *payload, int *out_status, ch
     if (s_attempt_id[0] == '\0')
     {
         *out_status = 404;
-        strncpy(out_reason, "Attempt id missing, please download again", out_reason_size - 1);
+        strncpy(out_reason, "????????????", out_reason_size - 1);
         out_reason[out_reason_size - 1] = '\0';
         return ESP_ERR_INVALID_STATE;
     }
@@ -737,7 +843,10 @@ static bool quiz_parse_questions(const char *json)
     s_state.questions_ready = (s_state.question_count > 0);
     s_state.test_finished = false;
     s_state.current_question = 0;
+    s_state.submit_inflight = false;
+    s_state.final_submit_success = false;
     memset(s_state.answers, 0xFF, sizeof(s_state.answers));
+    memset(s_state.submitted_answers, 0xFF, sizeof(s_state.submitted_answers));
     ESP_LOGI(TAG, "Loaded %d questions", s_state.question_count);
     return s_state.questions_ready;
 }
@@ -754,27 +863,27 @@ static bool quiz_download_questions(void)
                  esp_err_to_name(err), http_status, reason);
         if (http_status == 401)
         {
-            quiz_show_toast("Session expired, please log in again", 2200);
+            quiz_show_toast_cn("???????????", 2200);
         }
         else if (http_status == 403)
         {
-            quiz_show_toast("No access to this exam", 2200);
+            quiz_show_toast_cn("???????", 2200);
         }
         else if (http_status == 404)
         {
-            quiz_show_toast("No available exam / exam not found", 2200);
+            quiz_show_toast_cn("???????????", 2200);
         }
         else if (http_status == 409)
         {
-            quiz_show_toast("Exam state conflict or already submitted", 2200);
+            quiz_show_toast_cn("??????????", 2200);
         }
         else if (reason[0] != '\0')
         {
-            quiz_show_toast(reason, 2200);
+            quiz_show_toast_cn(reason, 2200);
         }
         else
         {
-            quiz_show_toast("Download failed", 1800);
+            quiz_show_toast_cn("????", 1800);
         }
         return false;
     }
@@ -788,11 +897,42 @@ static bool quiz_download_questions(void)
     if (!ok)
     {
         ESP_LOGE(TAG, "Parse JSON failed, abort UI");
-        quiz_show_toast("Invalid data", 1800);
+        quiz_show_toast_cn("????", 1800);
         return false;  // Block UI flow on failure
     }
 
     return true;
+}
+
+static char *quiz_build_single_answer_payload(uint8_t question_index, bool is_final_question)
+{
+    LV_UNUSED(is_final_question);
+
+    if (question_index >= s_state.question_count)
+    {
+        return NULL;
+    }
+
+    int your_choice = (s_state.answers[question_index] < QUIZ_OPTION_COUNT) ? (int)s_state.answers[question_index] : -1;
+    if (your_choice < 0)
+    {
+        return NULL;
+    }
+
+    cJSON *root = cJSON_CreateObject();
+    if (!root)
+    {
+        return NULL;
+    }
+
+    cJSON_AddStringToObject(root, "question_id", s_state.questions[question_index].id);
+    cJSON_AddNumberToObject(root, "choice", your_choice);
+    cJSON_AddNumberToObject(root, "progress_count", question_index + 1);
+    cJSON_AddNumberToObject(root, "duration_sec", (double)quiz_get_elapsed_duration_sec());
+
+    char *payload = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    return payload;
 }
 
 static char *quiz_build_submit_payload(void)
@@ -803,36 +943,121 @@ static char *quiz_build_submit_payload(void)
         return NULL;
     }
 
-    cJSON_AddNumberToObject(root, "duration_sec", 120);
-
-    cJSON *answers = cJSON_AddArrayToObject(root, "answers");
-    if (answers)
-    {
-        for (uint8_t i = 0; i < s_state.question_count; i++)
-        {
-            cJSON *item = cJSON_CreateObject();
-            if (!item)
-            {
-                continue;
-            }
-
-            cJSON_AddStringToObject(item, "question_id", s_state.questions[i].id);
-
-            int your_choice = (s_state.answers[i] < QUIZ_OPTION_COUNT) ? (int)s_state.answers[i] : -1;
-            if (your_choice < 0)
-            {
-                cJSON_Delete(item);
-                continue;
-            }
-
-            cJSON_AddNumberToObject(item, "your", your_choice);
-            cJSON_AddItemToArray(answers, item);
-        }
-    }
+    cJSON_AddNumberToObject(root, "duration_sec", (double)quiz_get_elapsed_duration_sec());
 
     char *payload = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     return payload;
+}
+
+static bool quiz_submit_question_answer(uint8_t question_index, bool is_final_question)
+{
+    if (question_index >= s_state.question_count)
+    {
+        return false;
+    }
+
+    uint8_t answer = s_state.answers[question_index];
+    if (answer >= QUIZ_OPTION_COUNT)
+    {
+        return false;
+    }
+
+    if (s_state.submitted_answers[question_index] == answer)
+    {
+        ESP_LOGI(TAG, "Skip duplicate submit q=%d answer=%d", question_index, answer);
+        return true;
+    }
+
+    char submit_reason[160] = {0};
+    int submit_status = 0;
+
+    for (int attempt = 1; attempt <= APP_SINGLE_ANSWER_RETRY_COUNT; attempt++)
+    {
+        char *payload = quiz_build_single_answer_payload(question_index, is_final_question);
+        if (!payload)
+        {
+            quiz_show_toast_cn("????", 1800);
+            return false;
+        }
+
+        esp_err_t err = quiz_http_post_single_answer(payload,
+                                                     &submit_status,
+                                                     submit_reason,
+                                                     sizeof(submit_reason));
+        free(payload);
+
+        if (err == ESP_OK)
+        {
+            s_state.submitted_answers[question_index] = answer;
+            if (attempt > 1)
+            {
+                quiz_show_toast_cn("??????", 1600);
+            }
+            return true;
+        }
+
+        if (attempt < APP_SINGLE_ANSWER_RETRY_COUNT)
+        {
+            quiz_show_toast_cn("????...", 1200);
+            vTaskDelay(pdMS_TO_TICKS(300));
+        }
+    }
+
+    if (submit_status == 401)
+    {
+        quiz_show_toast_cn("???????????", 2200);
+    }
+    else if (submit_status == 403)
+    {
+        quiz_show_toast_cn("??????", 2200);
+    }
+    else if (submit_status == 404)
+    {
+        quiz_show_toast_cn("????????", 2200);
+    }
+    else if (submit_status == 409)
+    {
+        quiz_show_toast_cn("?????????", 2200);
+    }
+    else if (submit_reason[0] != '\0')
+    {
+        quiz_show_toast_cn(submit_reason, 2200);
+    }
+    else
+    {
+        quiz_show_toast_cn("????????", 2200);
+    }
+
+    return false;
+}
+
+static void quiz_prepare_local_result(void)
+{
+    uint8_t correct = 0;
+    quiz_reset_server_result();
+
+    for (uint8_t i = 0; i < s_state.question_count; i++)
+    {
+        int your_choice = (s_state.answers[i] < QUIZ_OPTION_COUNT) ? s_state.answers[i] : -1;
+        int correct_choice = s_state.questions[i].correct_index;
+        if (your_choice == correct_choice)
+        {
+            correct++;
+        }
+        else if (s_state.server_wrong_count < QUIZ_MAX_QUESTIONS)
+        {
+            quiz_wrong_item_t *dst = &s_state.server_wrong[s_state.server_wrong_count];
+            memset(dst, 0, sizeof(*dst));
+            strncpy(dst->id, s_state.questions[i].id, sizeof(dst->id) - 1);
+            dst->correct = correct_choice;
+            dst->your = your_choice;
+            s_state.server_wrong_count++;
+        }
+    }
+
+    s_state.server_score = correct;
+    s_state.server_total = s_state.question_count;
 }
 
 static void quiz_handle_download(lv_event_t *e)
@@ -851,14 +1076,18 @@ static void quiz_handle_start_test(lv_event_t *e)
 
     if (!s_state.questions_ready)
     {
-        quiz_show_toast("Please download questions first", 2000);
+        quiz_show_toast_cn("??????", 2000);
         return;
     }
 
     s_state.current_question = 0;
     s_state.test_finished = false;
+    s_state.submit_inflight = false;
+    s_state.final_submit_success = false;
+    s_state.attempt_started_tick = xTaskGetTickCount();
     quiz_reset_server_result();
     memset(s_state.answers, 0xFF, sizeof(s_state.answers));
+    memset(s_state.submitted_answers, 0xFF, sizeof(s_state.submitted_answers));
 
     /* switch to test screen first */
     lv_scr_load(s_test_screen);
@@ -1070,12 +1299,10 @@ static void quiz_build_test_screen(void)
     lv_obj_set_style_border_opa(s_submit_btn, LV_OPA_100, LV_PART_MAIN);
 
     lv_obj_add_event_cb(s_submit_btn, quiz_handle_submit, LV_EVENT_CLICKED, NULL);
-
-    lv_obj_t *submit_lbl = lv_label_create(s_submit_btn);
-    lv_label_set_text(submit_lbl, "提交");
-    lv_obj_center(submit_lbl);
-    lv_obj_set_style_text_font(submit_lbl, UI_FONT_LARGE, 0);
-    quiz_set_cn_font_for_label(submit_lbl);
+    s_submit_label = lv_label_create(s_submit_btn);
+    lv_label_set_text(s_submit_label, "???");
+    lv_obj_center(s_submit_label);
+    quiz_set_cn_font_for_label(s_submit_label);
 }
 
 static void quiz_add_wrong_row(uint8_t qno, char your_c, char ans_c)
@@ -1556,53 +1783,35 @@ static void quiz_load_question(uint8_t index)
         uint8_t sel = s_state.answers[index];
         lv_obj_add_state(s_option_btns[sel], LV_STATE_CHECKED);
 
-        /* 閫夐」鏂囨湰涔熸仮澶嶉珮浜紙浣犲鏋滃笇鏈涙枃鏈篃缁匡細鏀规垚 LV_PALETTE_GREEN锛?*/
+        /* Restore option text highlight together with the button state. */
         lv_obj_set_style_text_color(s_option_labels[sel], OPTION_TEXT_ACTIVE_COLOR, 0);
     }
 
-    /* 鉁?姣忔鍔犺浇棰樼洰鍚庤嚜鍔ㄦ粴鍥為《閮?*/
+    quiz_update_submit_button_text(index);
+    quiz_set_submit_loading(false);
+
+    /* Always scroll back to the top when loading a new question. */
     lv_obj_scroll_to_y(s_scroll, 0, LV_ANIM_OFF);
 }
 
 static void quiz_finish_and_upload(void)
 {
     s_state.test_finished = true;
-    quiz_reset_server_result();
+    s_state.final_submit_success = false;
+    quiz_prepare_local_result();
 
     if (s_attempt_id[0] == '\0')
     {
-        quiz_show_toast("Attempt id missing, download again", 2000);
+        quiz_show_toast_cn("????????????", 2000);
+        quiz_show_results_screen();
         return;
     }
-
-    uint8_t correct = 0;
-    s_state.server_wrong_count = 0;
-    for (uint8_t i = 0; i < s_state.question_count; i++)
-    {
-        int your_choice = (s_state.answers[i] < QUIZ_OPTION_COUNT) ? s_state.answers[i] : -1;
-        int correct_choice = s_state.questions[i].correct_index;
-        if (your_choice == correct_choice)
-        {
-            correct++;
-        }
-        else if (s_state.server_wrong_count < QUIZ_MAX_QUESTIONS)
-        {
-            quiz_wrong_item_t *dst = &s_state.server_wrong[s_state.server_wrong_count];
-            memset(dst, 0, sizeof(*dst));
-            strncpy(dst->id, s_state.questions[i].id, sizeof(dst->id) - 1);
-            dst->correct = correct_choice;
-            dst->your = your_choice;
-            s_state.server_wrong_count++;
-        }
-    }
-
-    s_state.server_score = correct;
-    s_state.server_total = s_state.question_count;
 
     char *payload = quiz_build_submit_payload();
     if (!payload)
     {
-        quiz_show_toast("Out of memory", 1800);
+        quiz_show_toast_cn("????", 1800);
+        quiz_show_results_screen();
         return;
     }
 
@@ -1612,39 +1821,39 @@ static void quiz_finish_and_upload(void)
     free(payload);
     if (err == ESP_OK)
     {
-        quiz_show_toast_cn("结果已上传，请在主页查看", 1800);
-        if (s_home_screen)
-        {
-            lv_scr_load(s_home_screen);
-        }
+        s_state.final_submit_success = true;
+        quiz_show_toast_cn("???", 1800);
     }
     else
     {
         if (upload_status == 401)
         {
-            quiz_show_toast("Session expired, please log in again", 2200);
+            quiz_show_toast_cn("???????????", 2200);
         }
         else if (upload_status == 403)
         {
-            quiz_show_toast("No permission to submit", 2200);
+            quiz_show_toast_cn("????", 2200);
         }
         else if (upload_status == 404)
         {
-            quiz_show_toast("Attempt not found", 2200);
+            quiz_show_toast_cn("?????", 2200);
         }
         else if (upload_status == 409)
         {
-            quiz_show_toast("Attempt already submitted", 2200);
+            s_state.final_submit_success = true;
+            quiz_show_toast_cn("???", 1800);
         }
         else if (upload_reason[0] != '\0')
         {
-            quiz_show_toast(upload_reason, 2200);
+            quiz_show_toast_cn(upload_reason, 2200);
         }
         else
         {
-            quiz_show_toast("Upload failed", 1800);
+            quiz_show_toast_cn("?????????????", 2200);
         }
     }
+
+    quiz_show_results_screen();
 }
 
 static void quiz_hide_toast_cb(lv_timer_t *t)
@@ -1668,6 +1877,11 @@ static void quiz_back_to_home(lv_event_t *e)
 static void quiz_handle_submit(lv_event_t *e)
 {
     LV_UNUSED(e);
+    if (s_state.submit_inflight)
+    {
+        return;
+    }
+
     uint8_t idx = s_state.current_question;
     if (idx >= s_state.question_count)
     {
@@ -1676,20 +1890,28 @@ static void quiz_handle_submit(lv_event_t *e)
 
     if (s_state.answers[idx] >= QUIZ_OPTION_COUNT)
     {
-        quiz_show_toast_cn("请选择一个选项", 1600);
+        quiz_show_toast_cn("???????", 1600);
         return;
     }
 
-    if (idx + 1 >= s_state.question_count)
+    bool is_final_question = (idx + 1 >= s_state.question_count);
+
+    quiz_set_submit_loading(true);
+    if (!quiz_submit_question_answer(idx, is_final_question))
+    {
+        quiz_set_submit_loading(false);
+        return;
+    }
+
+    if (is_final_question)
     {
         quiz_finish_and_upload();
+        quiz_set_submit_loading(false);
+        return;
     }
-    else
-    {
-        s_state.current_question++;
-        s_state.answers[s_state.current_question] = 0xFF;
-        quiz_load_question(s_state.current_question);
-    }
+
+    s_state.current_question++;
+    quiz_load_question(s_state.current_question);
 }
 
 void quiz_app_create_ui(void)
@@ -1702,6 +1924,9 @@ void quiz_app_create_ui(void)
 
     memset(&s_state, 0, sizeof(s_state));
     memset(s_state.answers, 0xFF, sizeof(s_state.answers));
+    memset(s_state.submitted_answers, 0xFF, sizeof(s_state.submitted_answers));
+    s_state.final_submit_success = false;
+    s_state.attempt_started_tick = 0;
     quiz_reset_server_result();
 
     quiz_create_home_screen();
@@ -1752,6 +1977,7 @@ static void quiz_reset_server_result(void)
     s_state.server_score = -1;
     s_state.server_total = s_state.question_count;
     s_state.server_wrong_count = 0;
+    s_state.final_submit_success = false;
     memset(s_state.server_wrong, 0, sizeof(s_state.server_wrong));
 }
 
