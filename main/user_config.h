@@ -67,15 +67,15 @@
 
 /* Network and server config */
 #ifndef APP_WIFI_SSID
-#define APP_WIFI_SSID "JD"
+#define APP_WIFI_SSID "16517yyds"
 #endif
 
 #ifndef APP_WIFI_PASS
-#define APP_WIFI_PASS "123456789"
+#define APP_WIFI_PASS "15172052448"
 #endif
 
 #ifndef APP_SERVER_HOST
-#define APP_SERVER_HOST "10.247.52.86"
+#define APP_SERVER_HOST "192.168.31.201"
 #endif
 
 #ifndef APP_SERVER_PORT
