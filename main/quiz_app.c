@@ -69,10 +69,7 @@ typedef struct
     bool test_finished;
     bool submit_inflight;
     bool final_submit_success;
-<<<<<<< HEAD
     TickType_t attempt_started_tick;
-=======
->>>>>>> 0007b3115549354c5d21c3818b49bc74d75d798e
     int server_score;
     int server_total;
     uint8_t server_wrong_count;
@@ -130,10 +127,7 @@ static bool quiz_pick_first_exam_id(const char *json, char *exam_id, size_t exam
 static bool quiz_extract_error_reason(const char *json, char *out_reason, size_t out_reason_size);
 static char *quiz_build_single_answer_payload(uint8_t question_index, bool is_final_question);
 static char *quiz_build_submit_payload(void);
-<<<<<<< HEAD
 static uint32_t quiz_get_elapsed_duration_sec(void);
-=======
->>>>>>> 0007b3115549354c5d21c3818b49bc74d75d798e
 static bool quiz_submit_question_answer(uint8_t question_index, bool is_final_question);
 static void quiz_set_submit_loading(bool loading);
 static void quiz_update_submit_button_text(uint8_t index);
@@ -196,42 +190,9 @@ static void quiz_show_toast_cn(const char *text, uint32_t duration_ms)
 
 static void quiz_set_submit_loading(bool loading)
 {
-<<<<<<< HEAD
     // Avoid LVGL disabled-state transitions here. On this target/theme they can
     // trigger transition animation crashes when toggled around blocking network IO.
     s_state.submit_inflight = loading;
-=======
-    s_state.submit_inflight = loading;
-
-    if (s_submit_btn)
-    {
-        if (loading)
-        {
-            lv_obj_add_state(s_submit_btn, LV_STATE_DISABLED);
-        }
-        else
-        {
-            lv_obj_clear_state(s_submit_btn, LV_STATE_DISABLED);
-        }
-    }
-
-    for (int i = 0; i < QUIZ_OPTION_COUNT; i++)
-    {
-        if (!s_option_btns[i])
-        {
-            continue;
-        }
-
-        if (loading)
-        {
-            lv_obj_add_state(s_option_btns[i], LV_STATE_DISABLED);
-        }
-        else
-        {
-            lv_obj_clear_state(s_option_btns[i], LV_STATE_DISABLED);
-        }
-    }
->>>>>>> 0007b3115549354c5d21c3818b49bc74d75d798e
 }
 
 static void quiz_update_submit_button_text(uint8_t index)
@@ -242,8 +203,7 @@ static void quiz_update_submit_button_text(uint8_t index)
     }
 
     lv_label_set_text(s_submit_label,
-<<<<<<< HEAD
-                      (index + 1 >= s_state.question_count) ? "??" : "???");
+                      (index + 1 >= s_state.question_count) ? "完成" : "下一题");
     quiz_set_cn_font_for_label(s_submit_label);
 }
 
@@ -256,9 +216,6 @@ static uint32_t quiz_get_elapsed_duration_sec(void)
 
     TickType_t elapsed_ticks = xTaskGetTickCount() - s_state.attempt_started_tick;
     return (uint32_t)(elapsed_ticks / configTICK_RATE_HZ);
-=======
-                      (index + 1 >= s_state.question_count) ? "Finish" : "Next");
->>>>>>> 0007b3115549354c5d21c3818b49bc74d75d798e
 }
 
 static esp_err_t quiz_http_request(const char *path,
@@ -495,7 +452,7 @@ static esp_err_t quiz_http_get_questions(char **out_json, int *out_status, char 
     if (s_auth_token[0] == '\0')
     {
         *out_status = 401;
-        strncpy(out_reason, "????????????", out_reason_size - 1);
+        strncpy(out_reason, "登录凭证缺失，请重新登录", out_reason_size - 1);
         out_reason[out_reason_size - 1] = '\0';
         return ESP_ERR_INVALID_STATE;
     }
@@ -519,7 +476,7 @@ static esp_err_t quiz_http_get_questions(char **out_json, int *out_status, char 
         *out_status = list_status;
         if (!quiz_extract_error_reason(list_json, out_reason, out_reason_size))
         {
-            strncpy(out_reason, "????", out_reason_size - 1);
+            strncpy(out_reason, "下载失败", out_reason_size - 1);
             out_reason[out_reason_size - 1] = '\0';
         }
         free(list_json);
@@ -530,7 +487,7 @@ static esp_err_t quiz_http_get_questions(char **out_json, int *out_status, char 
     if (!quiz_pick_first_exam_id(list_json, exam_id, sizeof(exam_id)))
     {
         *out_status = 404;
-        strncpy(out_reason, "???????????", out_reason_size - 1);
+        strncpy(out_reason, "无可用考试或考试不存在", out_reason_size - 1);
         out_reason[out_reason_size - 1] = '\0';
         free(list_json);
         return ESP_FAIL;
@@ -563,7 +520,7 @@ static esp_err_t quiz_http_get_questions(char **out_json, int *out_status, char 
     {
         if (!quiz_extract_error_reason(start_json, out_reason, out_reason_size))
         {
-            strncpy(out_reason, "????", out_reason_size - 1);
+            strncpy(out_reason, "下载失败", out_reason_size - 1);
             out_reason[out_reason_size - 1] = '\0';
         }
         free(start_json);
@@ -586,11 +543,7 @@ static esp_err_t quiz_http_post_single_answer(const char *payload, int *out_stat
     if (s_auth_token[0] == '\0')
     {
         *out_status = 401;
-<<<<<<< HEAD
-        strncpy(out_reason, "????????????", out_reason_size - 1);
-=======
-        strncpy(out_reason, "Login token missing, please log in again", out_reason_size - 1);
->>>>>>> 0007b3115549354c5d21c3818b49bc74d75d798e
+        strncpy(out_reason, "登录凭证缺失，请重新登录", out_reason_size - 1);
         out_reason[out_reason_size - 1] = '\0';
         return ESP_ERR_INVALID_STATE;
     }
@@ -598,11 +551,7 @@ static esp_err_t quiz_http_post_single_answer(const char *payload, int *out_stat
     if (s_attempt_id[0] == '\0')
     {
         *out_status = 404;
-<<<<<<< HEAD
-        strncpy(out_reason, "????????????", out_reason_size - 1);
-=======
-        strncpy(out_reason, "Attempt id missing, please download again", out_reason_size - 1);
->>>>>>> 0007b3115549354c5d21c3818b49bc74d75d798e
+        strncpy(out_reason, "作答编号缺失，请重新下载", out_reason_size - 1);
         out_reason[out_reason_size - 1] = '\0';
         return ESP_ERR_INVALID_STATE;
     }
@@ -634,11 +583,7 @@ static esp_err_t quiz_http_post_single_answer(const char *payload, int *out_stat
             }
             else
             {
-<<<<<<< HEAD
-                strncpy(out_reason, "??????", out_reason_size - 1);
-=======
-                strncpy(out_reason, "Single answer submit failed", out_reason_size - 1);
->>>>>>> 0007b3115549354c5d21c3818b49bc74d75d798e
+                strncpy(out_reason, "单题保存失败", out_reason_size - 1);
                 out_reason[out_reason_size - 1] = '\0';
             }
         }
@@ -662,7 +607,7 @@ static esp_err_t quiz_http_post_results(const char *payload, int *out_status, ch
     if (s_auth_token[0] == '\0')
     {
         *out_status = 401;
-        strncpy(out_reason, "????????????", out_reason_size - 1);
+        strncpy(out_reason, "登录凭证缺失，请重新登录", out_reason_size - 1);
         out_reason[out_reason_size - 1] = '\0';
         return ESP_ERR_INVALID_STATE;
     }
@@ -670,7 +615,7 @@ static esp_err_t quiz_http_post_results(const char *payload, int *out_status, ch
     if (s_attempt_id[0] == '\0')
     {
         *out_status = 404;
-        strncpy(out_reason, "????????????", out_reason_size - 1);
+        strncpy(out_reason, "作答编号缺失，请重新下载", out_reason_size - 1);
         out_reason[out_reason_size - 1] = '\0';
         return ESP_ERR_INVALID_STATE;
     }
@@ -702,7 +647,7 @@ static esp_err_t quiz_http_post_results(const char *payload, int *out_status, ch
             }
             else
             {
-                strncpy(out_reason, "Upload failed", out_reason_size - 1);
+                strncpy(out_reason, "最终提交失败", out_reason_size - 1);
                 out_reason[out_reason_size - 1] = '\0';
             }
         }
@@ -918,19 +863,19 @@ static bool quiz_download_questions(void)
                  esp_err_to_name(err), http_status, reason);
         if (http_status == 401)
         {
-            quiz_show_toast_cn("???????????", 2200);
+            quiz_show_toast_cn("会话已过期，请重新登录", 2200);
         }
         else if (http_status == 403)
         {
-            quiz_show_toast_cn("???????", 2200);
+            quiz_show_toast_cn("无权访问该考试", 2200);
         }
         else if (http_status == 404)
         {
-            quiz_show_toast_cn("???????????", 2200);
+            quiz_show_toast_cn("无可用考试或考试不存在", 2200);
         }
         else if (http_status == 409)
         {
-            quiz_show_toast_cn("??????????", 2200);
+            quiz_show_toast_cn("考试状态冲突或已提交", 2200);
         }
         else if (reason[0] != '\0')
         {
@@ -938,7 +883,7 @@ static bool quiz_download_questions(void)
         }
         else
         {
-            quiz_show_toast_cn("????", 1800);
+            quiz_show_toast_cn("下载失败", 1800);
         }
         return false;
     }
@@ -952,7 +897,7 @@ static bool quiz_download_questions(void)
     if (!ok)
     {
         ESP_LOGE(TAG, "Parse JSON failed, abort UI");
-        quiz_show_toast_cn("????", 1800);
+        quiz_show_toast_cn("数据无效", 1800);
         return false;  // Block UI flow on failure
     }
 
@@ -961,11 +906,7 @@ static bool quiz_download_questions(void)
 
 static char *quiz_build_single_answer_payload(uint8_t question_index, bool is_final_question)
 {
-<<<<<<< HEAD
     LV_UNUSED(is_final_question);
-
-=======
->>>>>>> 0007b3115549354c5d21c3818b49bc74d75d798e
     if (question_index >= s_state.question_count)
     {
         return NULL;
@@ -984,17 +925,9 @@ static char *quiz_build_single_answer_payload(uint8_t question_index, bool is_fi
     }
 
     cJSON_AddStringToObject(root, "question_id", s_state.questions[question_index].id);
-<<<<<<< HEAD
     cJSON_AddNumberToObject(root, "choice", your_choice);
     cJSON_AddNumberToObject(root, "progress_count", question_index + 1);
     cJSON_AddNumberToObject(root, "duration_sec", (double)quiz_get_elapsed_duration_sec());
-=======
-    cJSON_AddNumberToObject(root, "your", your_choice);
-    cJSON_AddNumberToObject(root, "answer_index", your_choice);
-    cJSON_AddNumberToObject(root, "question_no", question_index + 1);
-    cJSON_AddNumberToObject(root, "total_questions", s_state.question_count);
-    cJSON_AddBoolToObject(root, "is_final_question", is_final_question);
->>>>>>> 0007b3115549354c5d21c3818b49bc74d75d798e
 
     char *payload = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
@@ -1043,11 +976,7 @@ static bool quiz_submit_question_answer(uint8_t question_index, bool is_final_qu
         char *payload = quiz_build_single_answer_payload(question_index, is_final_question);
         if (!payload)
         {
-<<<<<<< HEAD
-            quiz_show_toast_cn("????", 1800);
-=======
-            quiz_show_toast("Out of memory", 1800);
->>>>>>> 0007b3115549354c5d21c3818b49bc74d75d798e
+            quiz_show_toast_cn("内存不足", 1800);
             return false;
         }
 
@@ -1062,50 +991,33 @@ static bool quiz_submit_question_answer(uint8_t question_index, bool is_final_qu
             s_state.submitted_answers[question_index] = answer;
             if (attempt > 1)
             {
-<<<<<<< HEAD
-                quiz_show_toast_cn("??????", 1600);
-=======
-                quiz_show_toast_cn("Saved after retry", 1600);
->>>>>>> 0007b3115549354c5d21c3818b49bc74d75d798e
+                quiz_show_toast_cn("重试后已保存", 1600);
             }
             return true;
         }
 
-<<<<<<< HEAD
         if (attempt < APP_SINGLE_ANSWER_RETRY_COUNT)
         {
-            quiz_show_toast_cn("????...", 1200);
-=======
-        if (submit_status == 404 || submit_status == 405 || submit_status == 501)
-        {
-            quiz_show_toast_cn("Single-answer API missing", 2200);
-            return false;
-        }
-
-        if (attempt < APP_SINGLE_ANSWER_RETRY_COUNT)
-        {
-            quiz_show_toast_cn("Retrying...", 1200);
->>>>>>> 0007b3115549354c5d21c3818b49bc74d75d798e
+            quiz_show_toast_cn("正在重试...", 1200);
             vTaskDelay(pdMS_TO_TICKS(300));
         }
     }
 
     if (submit_status == 401)
     {
-<<<<<<< HEAD
-        quiz_show_toast_cn("???????????", 2200);
+        quiz_show_toast_cn("会话已过期，请重新登录", 2200);
     }
     else if (submit_status == 403)
     {
-        quiz_show_toast_cn("??????", 2200);
+        quiz_show_toast_cn("无权提交答案", 2200);
     }
     else if (submit_status == 404)
     {
-        quiz_show_toast_cn("????????", 2200);
+        quiz_show_toast_cn("作答或题目不存在", 2200);
     }
     else if (submit_status == 409)
     {
-        quiz_show_toast_cn("?????????", 2200);
+        quiz_show_toast_cn("作答已关闭或已提交", 2200);
     }
     else if (submit_reason[0] != '\0')
     {
@@ -1113,22 +1025,7 @@ static bool quiz_submit_question_answer(uint8_t question_index, bool is_final_qu
     }
     else
     {
-        quiz_show_toast_cn("????????", 2200);
-=======
-        quiz_show_toast("Session expired, please log in again", 2200);
-    }
-    else if (submit_status == 403)
-    {
-        quiz_show_toast("No permission to submit answer", 2200);
-    }
-    else if (submit_reason[0] != '\0')
-    {
-        quiz_show_toast(submit_reason, 2200);
-    }
-    else
-    {
-        quiz_show_toast_cn("Save failed, try again", 2200);
->>>>>>> 0007b3115549354c5d21c3818b49bc74d75d798e
+        quiz_show_toast_cn("保存失败，请重试", 2200);
     }
 
     return false;
@@ -1178,7 +1075,7 @@ static void quiz_handle_start_test(lv_event_t *e)
 
     if (!s_state.questions_ready)
     {
-        quiz_show_toast_cn("??????", 2000);
+        quiz_show_toast_cn("请先下载题目", 2000);
         return;
     }
 
@@ -1186,10 +1083,7 @@ static void quiz_handle_start_test(lv_event_t *e)
     s_state.test_finished = false;
     s_state.submit_inflight = false;
     s_state.final_submit_success = false;
-<<<<<<< HEAD
     s_state.attempt_started_tick = xTaskGetTickCount();
-=======
->>>>>>> 0007b3115549354c5d21c3818b49bc74d75d798e
     quiz_reset_server_result();
     memset(s_state.answers, 0xFF, sizeof(s_state.answers));
     memset(s_state.submitted_answers, 0xFF, sizeof(s_state.submitted_answers));
@@ -1405,14 +1299,8 @@ static void quiz_build_test_screen(void)
 
     lv_obj_add_event_cb(s_submit_btn, quiz_handle_submit, LV_EVENT_CLICKED, NULL);
     s_submit_label = lv_label_create(s_submit_btn);
-<<<<<<< HEAD
-    lv_label_set_text(s_submit_label, "???");
+    lv_label_set_text(s_submit_label, "下一题");
     lv_obj_center(s_submit_label);
-=======
-    lv_label_set_text(s_submit_label, "Next");
-    lv_obj_center(s_submit_label);
-    lv_obj_set_style_text_font(s_submit_label, UI_FONT_LARGE, 0);
->>>>>>> 0007b3115549354c5d21c3818b49bc74d75d798e
     quiz_set_cn_font_for_label(s_submit_label);
 }
 
@@ -1913,11 +1801,7 @@ static void quiz_finish_and_upload(void)
 
     if (s_attempt_id[0] == '\0')
     {
-<<<<<<< HEAD
-        quiz_show_toast_cn("????????????", 2000);
-=======
-        quiz_show_toast("Attempt id missing, download again", 2000);
->>>>>>> 0007b3115549354c5d21c3818b49bc74d75d798e
+        quiz_show_toast_cn("作答编号缺失，请重新下载", 2000);
         quiz_show_results_screen();
         return;
     }
@@ -1925,11 +1809,7 @@ static void quiz_finish_and_upload(void)
     char *payload = quiz_build_submit_payload();
     if (!payload)
     {
-<<<<<<< HEAD
-        quiz_show_toast_cn("????", 1800);
-=======
-        quiz_show_toast("Out of memory", 1800);
->>>>>>> 0007b3115549354c5d21c3818b49bc74d75d798e
+        quiz_show_toast_cn("内存不足", 1800);
         quiz_show_results_screen();
         return;
     }
@@ -1941,34 +1821,26 @@ static void quiz_finish_and_upload(void)
     if (err == ESP_OK)
     {
         s_state.final_submit_success = true;
-<<<<<<< HEAD
-        quiz_show_toast_cn("???", 1800);
-=======
-        quiz_show_toast_cn("Completed", 1800);
->>>>>>> 0007b3115549354c5d21c3818b49bc74d75d798e
+        quiz_show_toast_cn("已完成", 1800);
     }
     else
     {
         if (upload_status == 401)
         {
-            quiz_show_toast_cn("???????????", 2200);
+            quiz_show_toast_cn("会话已过期，请重新登录", 2200);
         }
         else if (upload_status == 403)
         {
-            quiz_show_toast_cn("????", 2200);
+            quiz_show_toast_cn("无权提交", 2200);
         }
         else if (upload_status == 404)
         {
-            quiz_show_toast_cn("?????", 2200);
+            quiz_show_toast_cn("作答不存在", 2200);
         }
         else if (upload_status == 409)
         {
             s_state.final_submit_success = true;
-<<<<<<< HEAD
-            quiz_show_toast_cn("???", 1800);
-=======
-            quiz_show_toast_cn("Completed", 1800);
->>>>>>> 0007b3115549354c5d21c3818b49bc74d75d798e
+            quiz_show_toast_cn("已完成", 1800);
         }
         else if (upload_reason[0] != '\0')
         {
@@ -1976,11 +1848,7 @@ static void quiz_finish_and_upload(void)
         }
         else
         {
-<<<<<<< HEAD
-            quiz_show_toast_cn("?????????????", 2200);
-=======
-            quiz_show_toast_cn("Answers saved, final submit failed", 2200);
->>>>>>> 0007b3115549354c5d21c3818b49bc74d75d798e
+            quiz_show_toast_cn("已保存作答，但最终交卷失败", 2200);
         }
     }
 
@@ -2021,11 +1889,7 @@ static void quiz_handle_submit(lv_event_t *e)
 
     if (s_state.answers[idx] >= QUIZ_OPTION_COUNT)
     {
-<<<<<<< HEAD
-        quiz_show_toast_cn("???????", 1600);
-=======
-        quiz_show_toast_cn("Select an option", 1600);
->>>>>>> 0007b3115549354c5d21c3818b49bc74d75d798e
+        quiz_show_toast_cn("请选择一个选项", 1600);
         return;
     }
 
@@ -2061,10 +1925,7 @@ void quiz_app_create_ui(void)
     memset(s_state.answers, 0xFF, sizeof(s_state.answers));
     memset(s_state.submitted_answers, 0xFF, sizeof(s_state.submitted_answers));
     s_state.final_submit_success = false;
-<<<<<<< HEAD
     s_state.attempt_started_tick = 0;
-=======
->>>>>>> 0007b3115549354c5d21c3818b49bc74d75d798e
     quiz_reset_server_result();
 
     quiz_create_home_screen();

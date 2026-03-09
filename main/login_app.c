@@ -379,12 +379,12 @@ static void login_app_handle_submit(lv_event_t *e)
 
     if (!account || account[0] == '\0' || !password || password[0] == '\0')
     {
-        login_app_update_status("???????");
+        login_app_update_status("账号或密码为空");
         return;
     }
 
     login_app_set_loading(true);
-    login_app_update_status("????...");
+    login_app_update_status("正在登录...");
 
     int http_status = 0;
     char token[192] = {0};
@@ -394,7 +394,7 @@ static void login_app_handle_submit(lv_event_t *e)
 
     if (err != ESP_OK)
     {
-        login_app_update_status("??????");
+        login_app_update_status("网络请求失败");
         if (s_result_cb)
         {
             s_result_cb(false, NULL, NULL);
@@ -406,7 +406,7 @@ static void login_app_handle_submit(lv_event_t *e)
     {
         if (token[0] == '\0')
         {
-            login_app_update_status("??????????");
+            login_app_update_status("登录成功，但凭证缺失");
             ESP_LOGE(TAG, "Login succeeded but token is empty");
             if (s_result_cb)
             {
@@ -415,7 +415,7 @@ static void login_app_handle_submit(lv_event_t *e)
             return;
         }
 
-        login_app_update_status("????");
+        login_app_update_status("登录成功");
         if (s_result_cb)
         {
             s_result_cb(true, token, account);
@@ -423,7 +423,7 @@ static void login_app_handle_submit(lv_event_t *e)
     }
     else if (http_status == 401)
     {
-        login_app_update_status("???????");
+        login_app_update_status("账号或密码错误");
         s_account_buf[0] = '\0';
         s_password_buf[0] = '\0';
         if (s_account_ta)
@@ -441,7 +441,7 @@ static void login_app_handle_submit(lv_event_t *e)
     }
     else
     {
-        login_app_update_status("????");
+        login_app_update_status("登录失败");
         if (s_result_cb)
         {
             s_result_cb(false, NULL, NULL);
