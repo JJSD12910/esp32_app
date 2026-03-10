@@ -46,6 +46,7 @@ LV_FONT_DECLARE(font_24_cn);
 typedef struct
 {
     char id[QUIZ_ID_LEN];
+    uint8_t question_no;
     int correct;
     int your;
 } quiz_wrong_item_t;
@@ -53,9 +54,9 @@ typedef struct
 typedef struct
 {
     char id[QUIZ_ID_LEN];
+    uint8_t question_no;
     char stem[QUIZ_TEXT_LEN];
     char options[QUIZ_OPTION_COUNT][QUIZ_OPTION_LEN];
-    uint8_t correct_index;
 } quiz_question_t;
 
 typedef struct
@@ -155,7 +156,6 @@ static void quiz_build_result_screen(void);
 static void quiz_show_results_screen(void);
 static void quiz_finish_and_upload(void);
 static void quiz_reset_server_result(void);
-static const quiz_question_t *quiz_find_question_by_id(const char *id);
 static void quiz_add_wrong_row(uint8_t qno, char your_c, char ans_c);
 
 static inline void quiz_set_cn_font_for_label(lv_obj_t *obj)
@@ -673,6 +673,7 @@ static esp_err_t quiz_http_post_results(const char *payload, int *out_status, ch
         return ESP_FAIL;
     }
 
+    quiz_reset_server_result();
     if (resp_json && resp_json[0] != '\0')
     {
         cJSON *root = cJSON_Parse(resp_json);
@@ -683,6 +684,9 @@ static esp_err_t quiz_http_post_results(const char *payload, int *out_status, ch
             {
                 cJSON *score_js = cJSON_GetObjectItemCaseSensitive(data, "score");
                 cJSON *total_js = cJSON_GetObjectItemCaseSensitive(data, "total");
+                cJSON *wrong_count_js = cJSON_GetObjectItemCaseSensitive(data, "wrong_count");
+                cJSON *wrong_items_js = cJSON_GetObjectItemCaseSensitive(data, "wrong_items");
+
                 if (cJSON_IsNumber(score_js))
                 {
                     s_state.server_score = score_js->valueint;
@@ -690,6 +694,45 @@ static esp_err_t quiz_http_post_results(const char *payload, int *out_status, ch
                 if (cJSON_IsNumber(total_js))
                 {
                     s_state.server_total = total_js->valueint;
+                }
+
+                if (cJSON_IsArray(wrong_items_js))
+                {
+                    cJSON *wrong_item = NULL;
+                    cJSON_ArrayForEach(wrong_item, wrong_items_js)
+                    {
+                        if (s_state.server_wrong_count >= QUIZ_MAX_QUESTIONS)
+                        {
+                            break;
+                        }
+
+                        if (!cJSON_IsObject(wrong_item))
+                        {
+                            continue;
+                        }
+
+                        quiz_wrong_item_t *dst = &s_state.server_wrong[s_state.server_wrong_count];
+                        cJSON *question_id_js = cJSON_GetObjectItemCaseSensitive(wrong_item, "question_id");
+                        cJSON *question_no_js = cJSON_GetObjectItemCaseSensitive(wrong_item, "question_no");
+                        cJSON *selected_index_js = cJSON_GetObjectItemCaseSensitive(wrong_item, "selected_index");
+                        cJSON *correct_index_js = cJSON_GetObjectItemCaseSensitive(wrong_item, "correct_index");
+
+                        memset(dst, 0, sizeof(*dst));
+                        if (cJSON_IsString(question_id_js) && question_id_js->valuestring)
+                        {
+                            strncpy(dst->id, question_id_js->valuestring, sizeof(dst->id) - 1);
+                            dst->id[sizeof(dst->id) - 1] = '\0';
+                        }
+                        dst->question_no = cJSON_IsNumber(question_no_js) ? (uint8_t)question_no_js->valueint : (uint8_t)(s_state.server_wrong_count + 1);
+                        dst->your = cJSON_IsNumber(selected_index_js) ? selected_index_js->valueint : -1;
+                        dst->correct = cJSON_IsNumber(correct_index_js) ? correct_index_js->valueint : -1;
+                        s_state.server_wrong_count++;
+                    }
+                }
+
+                if (cJSON_IsNumber(wrong_count_js) && wrong_count_js->valueint != s_state.server_wrong_count)
+                {
+                    ESP_LOGW(TAG, "wrong_count mismatch: api=%d parsed=%d", wrong_count_js->valueint, s_state.server_wrong_count);
                 }
             }
             cJSON_Delete(root);
@@ -699,6 +742,7 @@ static esp_err_t quiz_http_post_results(const char *payload, int *out_status, ch
     free(resp_json);
     return ESP_OK;
 }
+
 
 static bool quiz_parse_questions(const char *json)
 {
@@ -714,41 +758,9 @@ static bool quiz_parse_questions(const char *json)
         return false;
     }
 
-    s_attempt_id[0] = '\0';
-
-    cJSON *questions = NULL;
     cJSON *data = cJSON_GetObjectItemCaseSensitive(root, "data");
-
-    if (cJSON_IsObject(data))
-    {
-        cJSON *exam_id_js = cJSON_GetObjectItemCaseSensitive(data, "exam_id");
-        cJSON *attempt_id_js = cJSON_GetObjectItemCaseSensitive(data, "attempt_id");
-        if (cJSON_IsString(exam_id_js) && exam_id_js->valuestring)
-        {
-            strncpy(s_quiz_id, exam_id_js->valuestring, sizeof(s_quiz_id) - 1);
-            s_quiz_id[sizeof(s_quiz_id) - 1] = '\0';
-        }
-        if (cJSON_IsString(attempt_id_js) && attempt_id_js->valuestring)
-        {
-            strncpy(s_attempt_id, attempt_id_js->valuestring, sizeof(s_attempt_id) - 1);
-            s_attempt_id[sizeof(s_attempt_id) - 1] = '\0';
-        }
-
-        questions = cJSON_GetObjectItemCaseSensitive(data, "items");
-    }
-
-    if (!cJSON_IsArray(questions))
-    {
-        cJSON *quiz_id_js = cJSON_GetObjectItemCaseSensitive(root, "quiz_id");
-        if (cJSON_IsString(quiz_id_js) && quiz_id_js->valuestring)
-        {
-            strncpy(s_quiz_id, quiz_id_js->valuestring, sizeof(s_quiz_id) - 1);
-            s_quiz_id[sizeof(s_quiz_id) - 1] = '\0';
-        }
-        questions = cJSON_GetObjectItemCaseSensitive(root, "questions");
-    }
-
-    if (!cJSON_IsArray(questions))
+    cJSON *questions = cJSON_IsObject(data) ? cJSON_GetObjectItemCaseSensitive(data, "items") : NULL;
+    if (!cJSON_IsObject(data) || !cJSON_IsArray(questions))
     {
         cJSON_Delete(root);
         ESP_LOGE(TAG, "Questions field is missing");
@@ -756,7 +768,20 @@ static bool quiz_parse_questions(const char *json)
     }
 
     memset(&s_state, 0, sizeof(s_state));
-    s_state.question_count = 0;
+    s_attempt_id[0] = '\0';
+
+    cJSON *exam_id_js = cJSON_GetObjectItemCaseSensitive(data, "exam_id");
+    cJSON *attempt_id_js = cJSON_GetObjectItemCaseSensitive(data, "attempt_id");
+    if (cJSON_IsString(exam_id_js) && exam_id_js->valuestring)
+    {
+        strncpy(s_quiz_id, exam_id_js->valuestring, sizeof(s_quiz_id) - 1);
+        s_quiz_id[sizeof(s_quiz_id) - 1] = '\0';
+    }
+    if (cJSON_IsString(attempt_id_js) && attempt_id_js->valuestring)
+    {
+        strncpy(s_attempt_id, attempt_id_js->valuestring, sizeof(s_attempt_id) - 1);
+        s_attempt_id[sizeof(s_attempt_id) - 1] = '\0';
+    }
 
     cJSON *item = NULL;
     cJSON_ArrayForEach(item, questions)
@@ -766,92 +791,33 @@ static bool quiz_parse_questions(const char *json)
             break;
         }
 
-        cJSON *id = cJSON_GetObjectItemCaseSensitive(item, "id");
-        if (!cJSON_IsString(id))
-        {
-            id = cJSON_GetObjectItemCaseSensitive(item, "question_id");
-        }
+        cJSON *question_id_js = cJSON_GetObjectItemCaseSensitive(item, "question_id");
+        cJSON *question_no_js = cJSON_GetObjectItemCaseSensitive(item, "question_no");
+        cJSON *stem_js = cJSON_GetObjectItemCaseSensitive(item, "stem");
+        cJSON *options_js = cJSON_GetObjectItemCaseSensitive(item, "options");
 
-        cJSON *stem = cJSON_GetObjectItemCaseSensitive(item, "stem");
-        if (!cJSON_IsString(stem))
+        if (!cJSON_IsString(question_id_js) || !question_id_js->valuestring ||
+            !cJSON_IsString(stem_js) || !stem_js->valuestring ||
+            !cJSON_IsArray(options_js) || cJSON_GetArraySize(options_js) < QUIZ_OPTION_COUNT)
         {
-            stem = cJSON_GetObjectItemCaseSensitive(item, "question");
-        }
-        if (!cJSON_IsString(stem))
-        {
-            stem = cJSON_GetObjectItemCaseSensitive(item, "content");
-        }
-
-        cJSON *options = cJSON_GetObjectItemCaseSensitive(item, "options");
-        if (!cJSON_IsArray(options))
-        {
-            options = cJSON_GetObjectItemCaseSensitive(item, "choices");
-        }
-
-        cJSON *answer = cJSON_GetObjectItemCaseSensitive(item, "answer");
-        if (!cJSON_IsNumber(answer) && !cJSON_IsString(answer))
-        {
-            answer = cJSON_GetObjectItemCaseSensitive(item, "answer_index");
-        }
-        if (!cJSON_IsNumber(answer) && !cJSON_IsString(answer))
-        {
-            answer = cJSON_GetObjectItemCaseSensitive(item, "correct_index");
-        }
-
-        if (!cJSON_IsArray(options) || cJSON_GetArraySize(options) < QUIZ_OPTION_COUNT)
-        {
-            ESP_LOGW(TAG, "Skip malformed question");
+            ESP_LOGW(TAG, "Skip malformed question item");
             continue;
         }
 
         quiz_question_t *q = &s_state.questions[s_state.question_count];
-        strncpy(q->id, cJSON_IsString(id) ? id->valuestring : "NA", sizeof(q->id) - 1);
+        memset(q, 0, sizeof(*q));
+        strncpy(q->id, question_id_js->valuestring, sizeof(q->id) - 1);
         q->id[sizeof(q->id) - 1] = '\0';
-        strncpy(q->stem, cJSON_IsString(stem) ? stem->valuestring : "Untitled question", sizeof(q->stem) - 1);
+        q->question_no = cJSON_IsNumber(question_no_js) ? (uint8_t)question_no_js->valueint : (uint8_t)(s_state.question_count + 1);
+        strncpy(q->stem, stem_js->valuestring, sizeof(q->stem) - 1);
         q->stem[sizeof(q->stem) - 1] = '\0';
 
         for (int i = 0; i < QUIZ_OPTION_COUNT; i++)
         {
-            cJSON *opt = cJSON_GetArrayItem(options, i);
-            const char *opt_text = "N/A";
-            if (cJSON_IsString(opt) && opt->valuestring)
-            {
-                opt_text = opt->valuestring;
-            }
-            else if (cJSON_IsObject(opt))
-            {
-                cJSON *opt_str = cJSON_GetObjectItemCaseSensitive(opt, "text");
-                if (!cJSON_IsString(opt_str))
-                {
-                    opt_str = cJSON_GetObjectItemCaseSensitive(opt, "content");
-                }
-                if (cJSON_IsString(opt_str) && opt_str->valuestring)
-                {
-                    opt_text = opt_str->valuestring;
-                }
-            }
+            cJSON *opt = cJSON_GetArrayItem(options_js, i);
+            const char *opt_text = (cJSON_IsString(opt) && opt->valuestring) ? opt->valuestring : "N/A";
             strncpy(q->options[i], opt_text, sizeof(q->options[i]) - 1);
             q->options[i][sizeof(q->options[i]) - 1] = '\0';
-        }
-
-        int answer_index = 0;
-        if (cJSON_IsNumber(answer))
-        {
-            answer_index = answer->valueint;
-        }
-        else if (cJSON_IsString(answer) && answer->valuestring && answer->valuestring[0] != '\0')
-        {
-            char c = (char)toupper((unsigned char)answer->valuestring[0]);
-            if (c >= 'A' && c <= 'D')
-            {
-                answer_index = c - 'A';
-            }
-        }
-
-        q->correct_index = (uint8_t)answer_index;
-        if (q->correct_index >= QUIZ_OPTION_COUNT)
-        {
-            q->correct_index = 0;
         }
 
         s_state.question_count++;
@@ -868,6 +834,7 @@ static bool quiz_parse_questions(const char *json)
     ESP_LOGI(TAG, "Loaded %d questions", s_state.question_count);
     return s_state.questions_ready;
 }
+
 
 static bool quiz_download_questions(void)
 {
@@ -930,8 +897,8 @@ static char *quiz_build_single_answer_payload(uint8_t question_index, bool is_fi
         return NULL;
     }
 
-    int your_choice = (s_state.answers[question_index] < QUIZ_OPTION_COUNT) ? (int)s_state.answers[question_index] : -1;
-    if (your_choice < 0)
+    int selected_index = (s_state.answers[question_index] < QUIZ_OPTION_COUNT) ? (int)s_state.answers[question_index] : -1;
+    if (selected_index < 0)
     {
         return NULL;
     }
@@ -943,7 +910,7 @@ static char *quiz_build_single_answer_payload(uint8_t question_index, bool is_fi
     }
 
     cJSON_AddStringToObject(root, "question_id", s_state.questions[question_index].id);
-    cJSON_AddNumberToObject(root, "choice", your_choice);
+    cJSON_AddNumberToObject(root, "selected_index", selected_index);
     cJSON_AddNumberToObject(root, "progress_count", question_index + 1);
     cJSON_AddNumberToObject(root, "duration_sec", (double)quiz_get_elapsed_duration_sec());
 
@@ -951,6 +918,7 @@ static char *quiz_build_single_answer_payload(uint8_t question_index, bool is_fi
     cJSON_Delete(root);
     return payload;
 }
+
 
 static char *quiz_build_submit_payload(void)
 {
@@ -1051,31 +1019,9 @@ static bool quiz_submit_question_answer(uint8_t question_index, bool is_final_qu
 
 static void quiz_prepare_local_result(void)
 {
-    uint8_t correct = 0;
     quiz_reset_server_result();
-
-    for (uint8_t i = 0; i < s_state.question_count; i++)
-    {
-        int your_choice = (s_state.answers[i] < QUIZ_OPTION_COUNT) ? s_state.answers[i] : -1;
-        int correct_choice = s_state.questions[i].correct_index;
-        if (your_choice == correct_choice)
-        {
-            correct++;
-        }
-        else if (s_state.server_wrong_count < QUIZ_MAX_QUESTIONS)
-        {
-            quiz_wrong_item_t *dst = &s_state.server_wrong[s_state.server_wrong_count];
-            memset(dst, 0, sizeof(*dst));
-            strncpy(dst->id, s_state.questions[i].id, sizeof(dst->id) - 1);
-            dst->correct = correct_choice;
-            dst->your = your_choice;
-            s_state.server_wrong_count++;
-        }
-    }
-
-    s_state.server_score = correct;
-    s_state.server_total = s_state.question_count;
 }
+
 
 static void quiz_handle_download(lv_event_t *e)
 {
@@ -1418,12 +1364,25 @@ static void quiz_create_result_screen(void)
     lv_obj_set_style_bg_opa(s_result_scroll, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(s_result_scroll, 0, 0);
 
+    /* ===== Use submit result from server ===== */
+    int show_score = (s_state.server_score >= 0) ? s_state.server_score : 0;
+    int show_total = (s_state.server_total > 0) ? s_state.server_total : s_state.question_count;
+    if (show_total <= 0) show_total = 1;
+
+    int wrong_cnt = (int)s_state.server_wrong_count;
+    if (wrong_cnt <= 0 && show_total > show_score) wrong_cnt = show_total - show_score;
+    if (wrong_cnt < 0) wrong_cnt = 0;
+
+    int acc = (show_score * 100) / show_total;
+
+    /* ===== Title ===== */
     lv_obj_t *title = lv_label_create(s_result_scroll);
     lv_label_set_text(title, "结果");
     lv_obj_set_style_text_font(title, UI_FONT_NORMAL, 0);
     quiz_set_cn_font_for_label(title);
     lv_obj_set_style_text_color(title, lv_color_hex(0x111111), 0);
 
+    /* ===== Summary row: Score / Accuracy / Time / Correct / Wrong ===== */
     lv_obj_t *sum_row = lv_obj_create(s_result_scroll);
     lv_obj_clear_flag(sum_row, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_width(sum_row, LV_PCT(100));
@@ -1435,121 +1394,134 @@ static void quiz_create_result_screen(void)
                           LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_bg_opa(sum_row, LV_OPA_TRANSP, 0);
     lv_obj_set_style_pad_all(sum_row, 0, 0);
-    lv_obj_set_style_pad_gap(sum_row, 6, 0);
+    lv_obj_set_style_pad_gap(sum_row, 3, 0);
 
     lv_obj_t *score_item = lv_obj_create(sum_row);
     lv_obj_clear_flag(score_item, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_grow(score_item, 1);
     lv_obj_set_style_bg_color(score_item, lv_color_hex(0xF3F5F7), 0);
     lv_obj_set_style_bg_opa(score_item, LV_OPA_100, 0);
     lv_obj_set_style_border_width(score_item, 0, 0);
     lv_obj_set_style_radius(score_item, 6, 0);
-    lv_obj_set_style_pad_hor(score_item, 6, 0);
+    lv_obj_set_style_pad_hor(score_item, 2, 0);
     lv_obj_set_style_pad_ver(score_item, 2, 0);
     lv_obj_set_style_pad_gap(score_item, 2, 0);
-    lv_obj_set_flex_flow(score_item, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(score_item, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_t *score_key_label = lv_label_create(score_item);
-    lv_label_set_text(score_key_label, "得分：");
-    quiz_set_cn_font_for_label(score_key_label);
-    lv_obj_set_style_text_color(score_key_label, lv_color_hex(0x111111), 0);
-    s_result_score_value_label = lv_label_create(score_item);
-    lv_label_set_text(s_result_score_value_label, "0/0");
-    lv_obj_set_style_text_font(s_result_score_value_label, LV_FONT_DEFAULT, LV_PART_MAIN);
-    lv_obj_set_style_text_color(s_result_score_value_label, lv_color_hex(0x111111), 0);
+    lv_obj_set_flex_flow(score_item, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(score_item, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_t *score_key_lbl = lv_label_create(score_item);
+    lv_label_set_text(score_key_lbl, "得分");
+    lv_obj_set_width(score_key_lbl, LV_PCT(100));
+    lv_obj_set_style_text_align(score_key_lbl, LV_TEXT_ALIGN_CENTER, 0);
+    quiz_set_cn_font_for_label(score_key_lbl);
+    lv_obj_set_style_text_color(score_key_lbl, lv_color_hex(0x111111), 0);
+    lv_obj_t *score_val_lbl = lv_label_create(score_item);
+    lv_label_set_text_fmt(score_val_lbl, "%d/%d", show_score, show_total);
+    lv_obj_set_width(score_val_lbl, LV_PCT(100));
+    lv_obj_set_style_text_align(score_val_lbl, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(score_val_lbl, LV_FONT_DEFAULT, LV_PART_MAIN);
+    lv_obj_set_style_text_color(score_val_lbl, lv_color_hex(0x111111), 0);
 
-    lv_obj_t *accuracy_item = lv_obj_create(sum_row);
-    lv_obj_clear_flag(accuracy_item, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_color(accuracy_item, lv_color_hex(0xF3F5F7), 0);
-    lv_obj_set_style_bg_opa(accuracy_item, LV_OPA_100, 0);
-    lv_obj_set_style_border_width(accuracy_item, 0, 0);
-    lv_obj_set_style_radius(accuracy_item, 6, 0);
-    lv_obj_set_style_pad_hor(accuracy_item, 6, 0);
-    lv_obj_set_style_pad_ver(accuracy_item, 2, 0);
-    lv_obj_set_style_pad_gap(accuracy_item, 2, 0);
-    lv_obj_set_flex_flow(accuracy_item, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(accuracy_item, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_t *accuracy_key_label = lv_label_create(accuracy_item);
-    lv_label_set_text(accuracy_key_label, "正确率：");
-    quiz_set_cn_font_for_label(accuracy_key_label);
-    lv_obj_set_style_text_color(accuracy_key_label, lv_color_hex(0x111111), 0);
-    s_result_accuracy_value_label = lv_label_create(accuracy_item);
-    lv_label_set_text(s_result_accuracy_value_label, "0%");
-    lv_obj_set_style_text_font(s_result_accuracy_value_label, LV_FONT_DEFAULT, LV_PART_MAIN);
-    lv_obj_set_style_text_color(s_result_accuracy_value_label, lv_color_hex(0x111111), 0);
+    lv_obj_t *acc_item = lv_obj_create(sum_row);
+    lv_obj_clear_flag(acc_item, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_grow(acc_item, 1);
+    lv_obj_set_style_bg_color(acc_item, lv_color_hex(0xF3F5F7), 0);
+    lv_obj_set_style_bg_opa(acc_item, LV_OPA_100, 0);
+    lv_obj_set_style_border_width(acc_item, 0, 0);
+    lv_obj_set_style_radius(acc_item, 6, 0);
+    lv_obj_set_style_pad_hor(acc_item, 2, 0);
+    lv_obj_set_style_pad_ver(acc_item, 2, 0);
+    lv_obj_set_style_pad_gap(acc_item, 2, 0);
+    lv_obj_set_flex_flow(acc_item, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(acc_item, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_t *acc_key_lbl = lv_label_create(acc_item);
+    lv_label_set_text(acc_key_lbl, "正确率");
+    lv_obj_set_width(acc_key_lbl, LV_PCT(100));
+    lv_obj_set_style_text_align(acc_key_lbl, LV_TEXT_ALIGN_CENTER, 0);
+    quiz_set_cn_font_for_label(acc_key_lbl);
+    lv_obj_set_style_text_color(acc_key_lbl, lv_color_hex(0x111111), 0);
+    lv_obj_t *acc_val_lbl = lv_label_create(acc_item);
+    lv_label_set_text_fmt(acc_val_lbl, "%d%%", acc);
+    lv_obj_set_width(acc_val_lbl, LV_PCT(100));
+    lv_obj_set_style_text_align(acc_val_lbl, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(acc_val_lbl, LV_FONT_DEFAULT, LV_PART_MAIN);
+    lv_obj_set_style_text_color(acc_val_lbl, lv_color_hex(0x111111), 0);
 
     lv_obj_t *time_item = lv_obj_create(sum_row);
     lv_obj_clear_flag(time_item, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_grow(time_item, 1);
     lv_obj_set_style_bg_color(time_item, lv_color_hex(0xF3F5F7), 0);
     lv_obj_set_style_bg_opa(time_item, LV_OPA_100, 0);
     lv_obj_set_style_border_width(time_item, 0, 0);
     lv_obj_set_style_radius(time_item, 6, 0);
-    lv_obj_set_style_pad_hor(time_item, 6, 0);
+    lv_obj_set_style_pad_hor(time_item, 2, 0);
     lv_obj_set_style_pad_ver(time_item, 2, 0);
     lv_obj_set_style_pad_gap(time_item, 2, 0);
-    lv_obj_set_flex_flow(time_item, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(time_item, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_t *time_key_label = lv_label_create(time_item);
-    lv_label_set_text(time_key_label, "时间：");
-    quiz_set_cn_font_for_label(time_key_label);
-    lv_obj_set_style_text_color(time_key_label, lv_color_hex(0x111111), 0);
-    s_result_time_value_label = lv_label_create(time_item);
-    lv_label_set_text(s_result_time_value_label, "00:00");
-    lv_obj_set_style_text_font(s_result_time_value_label, LV_FONT_DEFAULT, LV_PART_MAIN);
-    lv_obj_set_style_text_color(s_result_time_value_label, lv_color_hex(0x111111), 0);
+    lv_obj_set_flex_flow(time_item, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(time_item, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_t *time_key_lbl = lv_label_create(time_item);
+    lv_label_set_text(time_key_lbl, "时间");
+    lv_obj_set_width(time_key_lbl, LV_PCT(100));
+    lv_obj_set_style_text_align(time_key_lbl, LV_TEXT_ALIGN_CENTER, 0);
+    quiz_set_cn_font_for_label(time_key_lbl);
+    lv_obj_set_style_text_color(time_key_lbl, lv_color_hex(0x111111), 0);
+    lv_obj_t *time_val_lbl = lv_label_create(time_item);
+    lv_label_set_text(time_val_lbl, "--:--");
+    lv_obj_set_width(time_val_lbl, LV_PCT(100));
+    lv_obj_set_style_text_align(time_val_lbl, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(time_val_lbl, LV_FONT_DEFAULT, LV_PART_MAIN);
+    lv_obj_set_style_text_color(time_val_lbl, lv_color_hex(0x111111), 0);
 
-    lv_obj_t *cw_row = lv_obj_create(s_result_scroll);
-    lv_obj_clear_flag(cw_row, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_width(cw_row, LV_PCT(100));
-    lv_obj_set_height(cw_row, LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(cw_row, LV_FLEX_FLOW_ROW_WRAP);
-    lv_obj_set_flex_align(cw_row,
-                          LV_FLEX_ALIGN_START,
-                          LV_FLEX_ALIGN_CENTER,
-                          LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_bg_opa(cw_row, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_pad_all(cw_row, 0, 0);
-    lv_obj_set_style_pad_gap(cw_row, 6, 0);
+    lv_obj_t *c_item = lv_obj_create(sum_row);
+    lv_obj_clear_flag(c_item, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_grow(c_item, 1);
+    lv_obj_set_style_bg_color(c_item, lv_color_hex(0xEAF6EC), 0);
+    lv_obj_set_style_bg_opa(c_item, LV_OPA_100, 0);
+    lv_obj_set_style_border_width(c_item, 0, 0);
+    lv_obj_set_style_radius(c_item, 6, 0);
+    lv_obj_set_style_pad_hor(c_item, 2, 0);
+    lv_obj_set_style_pad_ver(c_item, 2, 0);
+    lv_obj_set_style_pad_gap(c_item, 2, 0);
+    lv_obj_set_flex_flow(c_item, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(c_item, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_t *c_key_lbl = lv_label_create(c_item);
+    lv_label_set_text(c_key_lbl, "正确");
+    lv_obj_set_width(c_key_lbl, LV_PCT(100));
+    lv_obj_set_style_text_align(c_key_lbl, LV_TEXT_ALIGN_CENTER, 0);
+    quiz_set_cn_font_for_label(c_key_lbl);
+    lv_obj_set_style_text_color(c_key_lbl, lv_color_hex(0x1a7f37), 0);
+    lv_obj_t *c_val_lbl = lv_label_create(c_item);
+    lv_label_set_text_fmt(c_val_lbl, "%d", show_score);
+    lv_obj_set_width(c_val_lbl, LV_PCT(100));
+    lv_obj_set_style_text_align(c_val_lbl, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(c_val_lbl, LV_FONT_DEFAULT, LV_PART_MAIN);
+    lv_obj_set_style_text_color(c_val_lbl, lv_color_hex(0x1a7f37), 0);
 
-    lv_obj_t *correct_item = lv_obj_create(cw_row);
-    lv_obj_clear_flag(correct_item, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_color(correct_item, lv_color_hex(0xEAF6EC), 0);
-    lv_obj_set_style_bg_opa(correct_item, LV_OPA_100, 0);
-    lv_obj_set_style_border_width(correct_item, 0, 0);
-    lv_obj_set_style_radius(correct_item, 6, 0);
-    lv_obj_set_style_pad_hor(correct_item, 6, 0);
-    lv_obj_set_style_pad_ver(correct_item, 2, 0);
-    lv_obj_set_style_pad_gap(correct_item, 2, 0);
-    lv_obj_set_flex_flow(correct_item, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(correct_item, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_t *correct_key_label = lv_label_create(correct_item);
-    lv_label_set_text(correct_key_label, "正确数：");
-    quiz_set_cn_font_for_label(correct_key_label);
-    lv_obj_set_style_text_color(correct_key_label, lv_color_hex(0x1a7f37), 0);
-    s_result_correct_value_label = lv_label_create(correct_item);
-    lv_label_set_text(s_result_correct_value_label, "0");
-    lv_obj_set_style_text_font(s_result_correct_value_label, LV_FONT_DEFAULT, LV_PART_MAIN);
-    lv_obj_set_style_text_color(s_result_correct_value_label, lv_color_hex(0x1a7f37), 0);
+    lv_obj_t *w_item = lv_obj_create(sum_row);
+    lv_obj_clear_flag(w_item, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_grow(w_item, 1);
+    lv_obj_set_style_bg_color(w_item, lv_color_hex(0xFDEDED), 0);
+    lv_obj_set_style_bg_opa(w_item, LV_OPA_100, 0);
+    lv_obj_set_style_border_width(w_item, 0, 0);
+    lv_obj_set_style_radius(w_item, 6, 0);
+    lv_obj_set_style_pad_hor(w_item, 2, 0);
+    lv_obj_set_style_pad_ver(w_item, 2, 0);
+    lv_obj_set_style_pad_gap(w_item, 2, 0);
+    lv_obj_set_flex_flow(w_item, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(w_item, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_t *w_key_lbl = lv_label_create(w_item);
+    lv_label_set_text(w_key_lbl, "错误");
+    lv_obj_set_width(w_key_lbl, LV_PCT(100));
+    lv_obj_set_style_text_align(w_key_lbl, LV_TEXT_ALIGN_CENTER, 0);
+    quiz_set_cn_font_for_label(w_key_lbl);
+    lv_obj_set_style_text_color(w_key_lbl, lv_color_hex(0xb42318), 0);
+    lv_obj_t *w_val_lbl = lv_label_create(w_item);
+    lv_label_set_text_fmt(w_val_lbl, "%d", wrong_cnt);
+    lv_obj_set_width(w_val_lbl, LV_PCT(100));
+    lv_obj_set_style_text_align(w_val_lbl, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(w_val_lbl, LV_FONT_DEFAULT, LV_PART_MAIN);
+    lv_obj_set_style_text_color(w_val_lbl, lv_color_hex(0xb42318), 0);
 
-    lv_obj_t *wrong_item = lv_obj_create(cw_row);
-    lv_obj_clear_flag(wrong_item, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_color(wrong_item, lv_color_hex(0xFDEDED), 0);
-    lv_obj_set_style_bg_opa(wrong_item, LV_OPA_100, 0);
-    lv_obj_set_style_border_width(wrong_item, 0, 0);
-    lv_obj_set_style_radius(wrong_item, 6, 0);
-    lv_obj_set_style_pad_hor(wrong_item, 6, 0);
-    lv_obj_set_style_pad_ver(wrong_item, 2, 0);
-    lv_obj_set_style_pad_gap(wrong_item, 2, 0);
-    lv_obj_set_flex_flow(wrong_item, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(wrong_item, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_t *wrong_key_label = lv_label_create(wrong_item);
-    lv_label_set_text(wrong_key_label, "错误数：");
-    quiz_set_cn_font_for_label(wrong_key_label);
-    lv_obj_set_style_text_color(wrong_key_label, lv_color_hex(0xb42318), 0);
-    s_result_wrong_value_label = lv_label_create(wrong_item);
-    lv_label_set_text(s_result_wrong_value_label, "0");
-    lv_obj_set_style_text_font(s_result_wrong_value_label, LV_FONT_DEFAULT, LV_PART_MAIN);
-    lv_obj_set_style_text_color(s_result_wrong_value_label, lv_color_hex(0xb42318), 0);
-
+    /* ===== Divider ===== */
     lv_obj_t *divider = lv_obj_create(s_result_scroll);
     lv_obj_clear_flag(divider, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_width(divider, LV_PCT(100));
@@ -1564,184 +1536,18 @@ static void quiz_create_result_screen(void)
     quiz_set_cn_font_for_label(wrong_list_title);
     lv_obj_set_style_text_color(wrong_list_title, lv_color_hex(0x111111), 0);
 
-    memset(s_result_wrong_rows, 0, sizeof(s_result_wrong_rows));
-    for (uint8_t i = 0; i < QUIZ_MAX_QUESTIONS; i++)
-    {
-        quiz_init_result_wrong_row(&s_result_wrong_rows[i]);
-    }
-
-    s_result_all_good_label = lv_label_create(s_result_scroll);
-    lv_label_set_text(s_result_all_good_label, "全部答对");
-    lv_obj_set_style_text_font(s_result_all_good_label, UI_FONT_NORMAL, 0);
-    quiz_set_cn_font_for_label(s_result_all_good_label);
-    lv_obj_set_style_text_color(s_result_all_good_label, lv_color_hex(0x1a7f37), 0);
-    lv_obj_add_flag(s_result_all_good_label, LV_OBJ_FLAG_HIDDEN);
-
-    lv_obj_t *button_row = lv_obj_create(s_result_scroll);
-    lv_obj_clear_flag(button_row, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_width(button_row, LV_PCT(100));
-    lv_obj_set_height(button_row, LV_SIZE_CONTENT);
-    lv_obj_set_flex_flow(button_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(button_row,
-                          LV_FLEX_ALIGN_SPACE_BETWEEN,
-                          LV_FLEX_ALIGN_CENTER,
-                          LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_bg_opa(button_row, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_pad_all(button_row, 0, 0);
-    lv_obj_set_style_pad_gap(button_row, 10, 0);
-
-    lv_obj_t *retry_button = lv_btn_create(button_row);
-    lv_obj_set_height(retry_button, 44);
-    lv_obj_set_flex_grow(retry_button, 1);
-    lv_obj_set_style_bg_color(retry_button, lv_palette_main(LV_PALETTE_BLUE), 0);
-    lv_obj_set_style_radius(retry_button, 10, 0);
-    lv_obj_set_style_border_width(retry_button, 1, 0);
-    lv_obj_set_style_border_color(retry_button, lv_color_hex(0x2f6ee2), 0);
-    lv_obj_add_event_cb(retry_button, quiz_handle_start_test, LV_EVENT_CLICKED, NULL);
-
-    lv_obj_t *retry_label = lv_label_create(retry_button);
-    lv_label_set_text(retry_label, "重试");
-    lv_obj_set_style_text_font(retry_label, UI_FONT_NORMAL, 0);
-    quiz_set_cn_font_for_label(retry_label);
-    lv_obj_set_style_text_color(retry_label, lv_color_white(), 0);
-    lv_obj_center(retry_label);
-
-    lv_obj_t *back_button = lv_btn_create(button_row);
-    lv_obj_set_height(back_button, 44);
-    lv_obj_set_flex_grow(back_button, 1);
-    lv_obj_set_style_bg_color(back_button, lv_color_hex(0xEDEFF2), 0);
-    lv_obj_set_style_radius(back_button, 10, 0);
-    lv_obj_set_style_border_width(back_button, 1, 0);
-    lv_obj_set_style_border_color(back_button, lv_color_hex(0xD0D5DD), 0);
-    lv_obj_add_event_cb(back_button, quiz_back_to_home, LV_EVENT_CLICKED, NULL);
-
-    lv_obj_t *back_label = lv_label_create(back_button);
-    lv_label_set_text(back_label, "返回");
-    lv_obj_set_style_text_font(back_label, UI_FONT_NORMAL, 0);
-    quiz_set_cn_font_for_label(back_label);
-    lv_obj_set_style_text_color(back_label, lv_color_hex(0x111111), 0);
-    lv_obj_center(back_label);
-}
-
-static void quiz_add_wrong_row(uint8_t qno, char your_c, char ans_c)
-{
-    if (s_result_wrong_row_used >= QUIZ_MAX_QUESTIONS)
-    {
-        return;
-    }
-
-    quiz_set_result_wrong_row(&s_result_wrong_rows[s_result_wrong_row_used], qno, your_c, ans_c);
-    s_result_wrong_row_used++;
-}
-
-static void quiz_build_result_screen(void)
-{
-    if (!s_result_screen)
-    {
-        quiz_create_result_screen();
-    }
-
-    uint8_t local_correct = 0;
-    for (uint8_t i = 0; i < s_state.question_count; i++)
-    {
-        if (s_state.answers[i] < QUIZ_OPTION_COUNT &&
-            s_state.answers[i] == s_state.questions[i].correct_index)
-        {
-            local_correct++;
-        }
-    }
-
-    int show_score = (s_state.server_score >= 0) ? s_state.server_score : local_correct;
-    int show_total = (s_state.server_total > 0) ? s_state.server_total : s_state.question_count;
-    if (show_total <= 0)
-    {
-        show_total = 1;
-    }
-
-    int wrong_count = show_total - show_score;
-    if (wrong_count < 0)
-    {
-        wrong_count = 0;
-    }
-
-    int accuracy = (show_score * 100) / show_total;
-    uint32_t duration_sec = quiz_get_elapsed_duration_sec();
-    unsigned long duration_min = (unsigned long)(duration_sec / 60);
-    unsigned long duration_remain_sec = (unsigned long)(duration_sec % 60);
-
-    char score_text[32];
-    char accuracy_text[16];
-    char time_text[16];
-    char correct_text[16];
-    char wrong_text[16];
-    snprintf(score_text, sizeof(score_text), "%d/%d", show_score, show_total);
-    snprintf(accuracy_text, sizeof(accuracy_text), "%d%%", accuracy);
-    snprintf(time_text, sizeof(time_text), "%02lu:%02lu", duration_min, duration_remain_sec);
-    snprintf(correct_text, sizeof(correct_text), "%d", show_score);
-    snprintf(wrong_text, sizeof(wrong_text), "%d", wrong_count);
-
-    lv_label_set_text(s_result_score_value_label, score_text);
-    lv_label_set_text(s_result_accuracy_value_label, accuracy_text);
-    lv_label_set_text(s_result_time_value_label, time_text);
-    lv_label_set_text(s_result_correct_value_label, correct_text);
-    lv_label_set_text(s_result_wrong_value_label, wrong_text);
-
-    s_result_wrong_row_used = 0;
-    for (uint8_t i = 0; i < QUIZ_MAX_QUESTIONS; i++)
-    {
-        if (s_result_wrong_rows[i].row)
-        {
-            lv_obj_add_flag(s_result_wrong_rows[i].row, LV_OBJ_FLAG_HIDDEN);
-        }
-    }
-    if (s_result_all_good_label)
-    {
-        lv_obj_add_flag(s_result_all_good_label, LV_OBJ_FLAG_HIDDEN);
-    }
-
     bool has_wrong = false;
-    if (s_state.server_wrong_count > 0)
-    {
-        for (uint8_t i = 0; i < s_state.server_wrong_count; i++)
-        {
-            const quiz_wrong_item_t *wrong = &s_state.server_wrong[i];
-            int question_index = -1;
-            for (uint8_t k = 0; k < s_state.question_count; k++)
-            {
-                if (strncmp(s_state.questions[k].id, wrong->id, sizeof(s_state.questions[k].id)) == 0)
-                {
-                    question_index = (int)k;
-                    break;
-                }
-            }
-            if (question_index < 0)
-            {
-                question_index = 0;
-            }
 
-            char your_c = (wrong->your >= 0 && wrong->your < QUIZ_OPTION_COUNT) ? (char)('A' + wrong->your) : '-';
-            char ans_c = (wrong->correct >= 0 && wrong->correct < QUIZ_OPTION_COUNT) ? (char)('A' + wrong->correct) : '-';
-            quiz_add_wrong_row((uint8_t)(question_index + 1), your_c, ans_c);
-            has_wrong = true;
-        }
-    }
-    else
+    for (uint8_t i = 0; i < s_state.server_wrong_count; i++)
     {
-        for (uint8_t i = 0; i < s_state.question_count; i++)
-        {
-            int your = (s_state.answers[i] < QUIZ_OPTION_COUNT) ? (int)s_state.answers[i] : -1;
-            int corr = (int)s_state.questions[i].correct_index;
-            if (your == corr)
-            {
-                continue;
-            }
+        const quiz_wrong_item_t *wrong = &s_state.server_wrong[i];
+        char your_c = (wrong->your >= 0 && wrong->your < QUIZ_OPTION_COUNT) ? ('A' + wrong->your) : '-';
+        char ans_c  = (wrong->correct >= 0 && wrong->correct < QUIZ_OPTION_COUNT) ? ('A' + wrong->correct) : '-';
 
-            char your_c = (your >= 0 && your < QUIZ_OPTION_COUNT) ? (char)('A' + your) : '-';
-            char ans_c = (corr >= 0 && corr < QUIZ_OPTION_COUNT) ? (char)('A' + corr) : '-';
-            quiz_add_wrong_row((uint8_t)(i + 1), your_c, ans_c);
-            has_wrong = true;
-        }
+        quiz_add_wrong_row(wrong->question_no > 0 ? wrong->question_no : (uint8_t)(i + 1), your_c, ans_c);
+        has_wrong = true;
     }
+
 
     if (!has_wrong && s_result_all_good_label)
     {
@@ -2083,20 +1889,4 @@ static void quiz_reset_server_result(void)
     s_state.server_wrong_count = 0;
     s_state.final_submit_success = false;
     memset(s_state.server_wrong, 0, sizeof(s_state.server_wrong));
-}
-
-static const quiz_question_t *quiz_find_question_by_id(const char *id)
-{
-    if (!id)
-    {
-        return NULL;
-    }
-    for (uint8_t i = 0; i < s_state.question_count; i++)
-    {
-        if (strncmp(s_state.questions[i].id, id, sizeof(s_state.questions[i].id)) == 0)
-        {
-            return &s_state.questions[i];
-        }
-    }
-    return NULL;
 }
