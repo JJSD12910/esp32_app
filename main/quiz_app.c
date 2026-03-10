@@ -1,4 +1,4 @@
-﻿#include "quiz_app.h"
+#include "quiz_app.h"
 
 #include <ctype.h>
 #include <stdbool.h>
@@ -156,6 +156,7 @@ static void quiz_build_result_screen(void);
 static void quiz_show_results_screen(void);
 static void quiz_finish_and_upload(void);
 static void quiz_reset_server_result(void);
+static bool quiz_has_server_result(void);
 static void quiz_add_wrong_row(uint8_t qno, char your_c, char ans_c);
 
 static inline void quiz_set_cn_font_for_label(lv_obj_t *obj)
@@ -1023,6 +1024,26 @@ static void quiz_prepare_local_result(void)
 }
 
 
+static bool quiz_has_server_result(void)
+{
+    if (s_state.server_score < 0 || s_state.server_total <= 0)
+    {
+        return false;
+    }
+
+    if (s_state.server_score > s_state.server_total)
+    {
+        return false;
+    }
+
+    if (s_state.server_wrong_count > s_state.server_total)
+    {
+        return false;
+    }
+
+    return true;
+}
+
 static void quiz_handle_download(lv_event_t *e)
 {
     LV_UNUSED(e);
@@ -1339,6 +1360,19 @@ static void quiz_set_result_wrong_row(const quiz_wrong_row_ui_t *row_ui, uint8_t
     lv_obj_clear_flag(row_ui->row, LV_OBJ_FLAG_HIDDEN);
 }
 
+static void quiz_add_wrong_row(uint8_t qno, char your_c, char ans_c)
+{
+    if (!s_result_scroll || s_result_wrong_row_used >= QUIZ_MAX_QUESTIONS)
+    {
+        return;
+    }
+
+    quiz_wrong_row_ui_t *row_ui = &s_result_wrong_rows[s_result_wrong_row_used++];
+    memset(row_ui, 0, sizeof(*row_ui));
+    quiz_init_result_wrong_row(row_ui);
+    quiz_set_result_wrong_row(row_ui, qno, your_c, ans_c);
+}
+
 static void quiz_create_result_screen(void)
 {
     if (s_result_screen)
@@ -1363,7 +1397,23 @@ static void quiz_create_result_screen(void)
     lv_obj_set_style_pad_gap(s_result_scroll, 4, 0);
     lv_obj_set_style_bg_opa(s_result_scroll, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(s_result_scroll, 0, 0);
+}
 
+static void quiz_build_result_screen(void)
+{
+    if (s_result_screen)
+    {
+        lv_obj_del(s_result_screen);
+        s_result_screen = NULL;
+        s_result_scroll = NULL;
+    }
+
+    quiz_create_result_screen();
+
+    s_result_all_good_label = NULL;
+    s_result_wrong_row_used = 0;
+    memset(s_result_wrong_rows, 0, sizeof(s_result_wrong_rows));
+{
     /* ===== Use submit result from server ===== */
     int show_score = (s_state.server_score >= 0) ? s_state.server_score : 0;
     int show_total = (s_state.server_total > 0) ? s_state.server_total : s_state.question_count;
@@ -1549,7 +1599,7 @@ static void quiz_create_result_screen(void)
     }
 
 
-    if (!has_wrong && s_result_all_good_label)
+    if (!has_wrong && wrong_cnt == 0 && s_result_all_good_label)
     {
         lv_obj_clear_flag(s_result_all_good_label, LV_OBJ_FLAG_HIDDEN);
     }
@@ -1705,14 +1755,13 @@ static void quiz_load_question(uint8_t index)
 
 static void quiz_finish_and_upload(void)
 {
-    s_state.test_finished = true;
+    s_state.test_finished = false;
     s_state.final_submit_success = false;
     quiz_prepare_local_result();
 
     if (s_attempt_id[0] == '\0')
     {
         quiz_show_toast_cn("作答编号缺失，请重新下载", 2000);
-        quiz_show_results_screen();
         return;
     }
 
@@ -1720,7 +1769,6 @@ static void quiz_finish_and_upload(void)
     if (!payload)
     {
         quiz_show_toast_cn("内存不足", 1800);
-        quiz_show_results_screen();
         return;
     }
 
@@ -1728,10 +1776,18 @@ static void quiz_finish_and_upload(void)
     int upload_status = 0;
     esp_err_t err = quiz_http_post_results(payload, &upload_status, upload_reason, sizeof(upload_reason));
     free(payload);
-    if (err == ESP_OK)
+    if (err == ESP_OK && quiz_has_server_result())
     {
+        s_state.test_finished = true;
         s_state.final_submit_success = true;
         quiz_show_toast_cn("已完成", 1800);
+        quiz_show_results_screen();
+        return;
+    }
+    else if (err == ESP_OK)
+    {
+        quiz_reset_server_result();
+        quiz_show_toast_cn("已提交，但未返回结果", 2200);
     }
     else
     {
@@ -1749,8 +1805,7 @@ static void quiz_finish_and_upload(void)
         }
         else if (upload_status == 409)
         {
-            s_state.final_submit_success = true;
-            quiz_show_toast_cn("已完成", 1800);
+            quiz_show_toast_cn("试卷已提交，但未返回结果", 2200);
         }
         else if (upload_reason[0] != '\0')
         {
@@ -1761,8 +1816,6 @@ static void quiz_finish_and_upload(void)
             quiz_show_toast_cn("已保存作答，但最终交卷失败", 2200);
         }
     }
-
-    quiz_show_results_screen();
 }
 
 static void quiz_hide_toast_cb(lv_timer_t *t)
