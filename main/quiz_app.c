@@ -1360,6 +1360,19 @@ static void quiz_set_result_wrong_row(const quiz_wrong_row_ui_t *row_ui, uint8_t
     lv_obj_clear_flag(row_ui->row, LV_OBJ_FLAG_HIDDEN);
 }
 
+static void quiz_add_wrong_row(uint8_t qno, char your_c, char ans_c)
+{
+    if (!s_result_scroll || s_result_wrong_row_used >= QUIZ_MAX_QUESTIONS)
+    {
+        return;
+    }
+
+    quiz_wrong_row_ui_t *row_ui = &s_result_wrong_rows[s_result_wrong_row_used++];
+    memset(row_ui, 0, sizeof(*row_ui));
+    quiz_init_result_wrong_row(row_ui);
+    quiz_set_result_wrong_row(row_ui, qno, your_c, ans_c);
+}
+
 static void quiz_create_result_screen(void)
 {
     if (s_result_screen)
@@ -1384,7 +1397,23 @@ static void quiz_create_result_screen(void)
     lv_obj_set_style_pad_gap(s_result_scroll, 4, 0);
     lv_obj_set_style_bg_opa(s_result_scroll, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(s_result_scroll, 0, 0);
+}
 
+static void quiz_build_result_screen(void)
+{
+    if (s_result_screen)
+    {
+        lv_obj_del(s_result_screen);
+        s_result_screen = NULL;
+        s_result_scroll = NULL;
+    }
+
+    quiz_create_result_screen();
+
+    s_result_all_good_label = NULL;
+    s_result_wrong_row_used = 0;
+    memset(s_result_wrong_rows, 0, sizeof(s_result_wrong_rows));
+{
     /* ===== Use submit result from server ===== */
     int show_score = (s_state.server_score >= 0) ? s_state.server_score : 0;
     int show_total = (s_state.server_total > 0) ? s_state.server_total : s_state.question_count;
