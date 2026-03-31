@@ -237,6 +237,7 @@ static uint32_t quiz_get_elapsed_duration_sec(void)
     return (uint32_t)(elapsed_ticks / configTICK_RATE_HZ);
 }
 
+/* HTTP 请求通用函数：执行 HTTP GET/POST 请求并返回响应数据 */
 static esp_err_t quiz_http_request(const char *path,
                                    esp_http_client_method_t method,
                                    const char *auth_token,
@@ -255,7 +256,7 @@ static esp_err_t quiz_http_request(const char *path,
     }
 
     *out_status = 0;
-    *out_body = NULL;
+    *out_body = NULL;  /* 初始化为 NULL，确保安全清理内存 */
 
     esp_http_client_config_t config = {
         .host = APP_SERVER_HOST,
@@ -334,6 +335,7 @@ static esp_err_t quiz_http_request(const char *path,
                 free(buffer);
                 esp_http_client_close(client);
                 esp_http_client_cleanup(client);
+                *out_body = NULL;  /* 确保失败时输出指针为 NULL */
                 return ESP_ERR_NO_MEM;
             }
             buffer = grown;
@@ -346,6 +348,7 @@ static esp_err_t quiz_http_request(const char *path,
             free(buffer);
             esp_http_client_close(client);
             esp_http_client_cleanup(client);
+            *out_body = NULL;  /* Ensure output pointer is NULL on failure */
             return ESP_FAIL;
         }
         if (read_len == 0)
@@ -382,16 +385,26 @@ static bool quiz_extract_error_reason(const char *json, char *out_reason, size_t
         return false;
     }
 
-    const cJSON *msg = cJSON_GetObjectItemCaseSensitive(root, "message");
-    const cJSON *reason = cJSON_GetObjectItemCaseSensitive(root, "reason");
-    const cJSON *data = cJSON_GetObjectItemCaseSensitive(root, "data");
+    cJSON *msg = cJSON_GetObjectItemCaseSensitive(root, "message");
+    cJSON *reason = cJSON_GetObjectItemCaseSensitive(root, "reason");
+    cJSON *data = cJSON_GetObjectItemCaseSensitive(root, "data");
     if (!cJSON_IsString(reason) && cJSON_IsObject(data))
     {
         reason = cJSON_GetObjectItemCaseSensitive(data, "reason");
     }
 
-    const cJSON *chosen = cJSON_IsString(msg) ? msg : reason;
-    if (cJSON_IsString(chosen) && chosen->valuestring && chosen->valuestring[0] != '\0')
+    /* Safe selection logic with null pointer checks */
+    const cJSON *chosen = NULL;
+    if (cJSON_IsString(msg) && msg->valuestring && msg->valuestring[0] != '\0')
+    {
+        chosen = msg;
+    }
+    else if (cJSON_IsString(reason) && reason->valuestring && reason->valuestring[0] != '\0')
+    {
+        chosen = reason;
+    }
+
+    if (chosen && chosen->valuestring && chosen->valuestring[0] != '\0')
     {
         strncpy(out_reason, chosen->valuestring, out_reason_size - 1);
         out_reason[out_reason_size - 1] = '\0';
@@ -587,6 +600,10 @@ static esp_err_t quiz_http_post_single_answer(const char *payload, int *out_stat
                                       &resp_json);
     if (err != ESP_OK)
     {
+        if (resp_json)  /* Fix: Free memory on error */
+        {
+            free(resp_json);
+        }
         return err;
     }
 
@@ -651,6 +668,10 @@ static esp_err_t quiz_http_post_results(const char *payload, int *out_status, ch
                                       &resp_json);
     if (err != ESP_OK)
     {
+        if (resp_json)  /* Fix: Free memory on error */
+        {
+            free(resp_json);
+        }
         return err;
     }
 
@@ -1150,9 +1171,9 @@ static void quiz_build_test_screen(void)
                           LV_FLEX_ALIGN_START,
                           LV_FLEX_ALIGN_START);
 
-    /* 鍏ㄥ眬闂磋窛锛氭帶鍒堕骞?閫夐」/鎸夐挳鍧椾箣闂寸殑璺濈 */
+    /* 滚动容器样式设置：影响题目/选项/按钮区域的布局 */
     lv_obj_set_style_pad_all(s_scroll, 0, 0);
-    lv_obj_set_style_pad_gap(s_scroll, 8, 0);          /* 鈫?璁╂暣浣撴洿鑸掑睍涓€鐐?*/
+    lv_obj_set_style_pad_gap(s_scroll, 8, 0);          /* 水平间距：滚动区域内部元素之间的间距 */
     lv_obj_set_style_bg_opa(s_scroll, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(s_scroll, 0, 0);
 
@@ -1172,7 +1193,7 @@ static void quiz_build_test_screen(void)
     lv_obj_set_style_pad_left(q_row, 8, 0);
     lv_obj_set_style_pad_right(q_row, 8, 0);
     lv_obj_set_style_pad_top(q_row, 8, 0);
-    lv_obj_set_style_pad_bottom(q_row, 2, 0);          /* 鈫?棰樺共鍜岀涓€鏉￠€夐」涔嬮棿鍒尋 */
+    lv_obj_set_style_pad_bottom(q_row, 2, 0);          /* 底部间距：题目区域与下一个元素之间的间距 */
     lv_obj_set_style_pad_gap(q_row, 8, 0);
 
     lv_obj_set_style_min_height(q_row, 0, 0);
@@ -1185,7 +1206,7 @@ static void quiz_build_test_screen(void)
     lv_label_set_long_mode(s_question_label, LV_LABEL_LONG_WRAP);
     lv_label_set_text(s_question_label, "Loading...");
 
-    /* 鉁?瀛楀彿锛氶骞插湪杩欓噷璋?*/
+    /* 字体设置：题目内容显示的字体大小 */
     lv_obj_set_style_text_font(s_question_label, QUIZ_ANSWER_FONT, 0);
 
     /* Right: progress label */
@@ -1202,13 +1223,13 @@ static void quiz_build_test_screen(void)
         lv_label_set_long_mode(s_option_labels[i], LV_LABEL_LONG_WRAP);
         lv_label_set_text_fmt(s_option_labels[i], "%c. ", 'A' + i);
 
-        /* 宸﹀彸杈硅窛 + 姣忔潯閫夐」鑷韩涓婁笅鐣欑櫧锛岃閫夐」闂存洿缇庤 */
+        /* 选项文本样式：选项文字的内外边距设置 */
         lv_obj_set_style_pad_left(s_option_labels[i], 10, 0);
         lv_obj_set_style_pad_right(s_option_labels[i], 10, 0);
         lv_obj_set_style_pad_top(s_option_labels[i], 2, 0);
         lv_obj_set_style_pad_bottom(s_option_labels[i], 2, 0);
 
-        /* 鉁?瀛楀彿锛氶€夐」鍦ㄨ繖閲岃皟 鈥斺€?浣犺鈥滃叏閮ㄥぇ瀛椻€濓紝杩欓噷鏀规垚 LARGE */
+        /* 字体选择：根据可用的字体动态选择，优先使用 Montserrat 字体，否则回退到 LARGE */
         lv_obj_set_style_text_font(s_option_labels[i], QUIZ_ANSWER_FONT, 0);
         lv_obj_set_style_text_color(s_option_labels[i], OPTION_TEXT_NORMAL_COLOR, 0);
     }
@@ -1223,7 +1244,7 @@ static void quiz_build_test_screen(void)
                           LV_FLEX_ALIGN_CENTER,
                           LV_FLEX_ALIGN_CENTER);
 
-    /* 涓や晶鐣欒竟璺?+ 鎸夐挳涔嬮棿鐣欓棿闅?*/
+    /* 按钮区域设置：选项按钮和提交按钮的布局控制 */
     lv_obj_set_style_pad_left(btn_row, 8, 0);
     lv_obj_set_style_pad_right(btn_row, 8, 0);
     lv_obj_set_style_pad_top(btn_row, 6, 0);
@@ -1243,22 +1264,22 @@ static void quiz_build_test_screen(void)
     {
         s_option_btns[i] = lv_btn_create(btn_row);
 
-        /* 鍧囧垎瀹藉害锛堣€冭檻杈硅窛/闂撮殧鍚庝粛绛夊锛?*/
+        /* 按钮设置：伸缩布局设置按钮的大小分布 */
         lv_obj_set_flex_grow(s_option_btns[i], 1);
         lv_obj_set_height(s_option_btns[i], 172);
 
         lv_obj_add_flag(s_option_btns[i], LV_OBJ_FLAG_CHECKABLE);
 
-        /* 鐧借竟妗?*/
+        /* 边框设置：按钮的边框样式 */
         lv_obj_set_style_border_width(s_option_btns[i], 2, LV_PART_MAIN);
         lv_obj_set_style_border_color(s_option_btns[i], border_col, LV_PART_MAIN);
         lv_obj_set_style_border_opa(s_option_btns[i], LV_OPA_100, LV_PART_MAIN);
 
-        /* 閫変腑缁胯壊 */
+        /* 选中状态颜色：按钮被选中时的背景颜色 */
         lv_obj_set_style_bg_color(s_option_btns[i], checked_bg, LV_PART_MAIN | LV_STATE_CHECKED);
         lv_obj_set_style_bg_opa(s_option_btns[i], LV_OPA_100, LV_PART_MAIN | LV_STATE_CHECKED);
 
-        /* 閫変腑鏃舵枃瀛楃櫧鑹叉洿娓呮櫚 */
+        /* 选中状态文字颜色：按钮被选中时的文字颜色 */
         lv_obj_set_style_text_color(s_option_btns[i], lv_color_white(), LV_PART_MAIN | LV_STATE_CHECKED);
 
         lv_obj_add_event_cb(
@@ -1273,7 +1294,7 @@ static void quiz_build_test_screen(void)
         lv_obj_set_style_text_font(lbl, QUIZ_ANSWER_FONT, 0);
     }
 
-    /* Submit: 涓嶈 checked 鍙樿壊锛堜笉鍔?checkable/涓嶈缃?LV_STATE_CHECKED 鏍峰紡锛?*/
+    /* 提交按钮：不使用 checked 状态，不设置 checkable 标志，避免被误选 */
     s_submit_btn = lv_btn_create(btn_row);
     lv_obj_set_flex_grow(s_submit_btn, 1);
     lv_obj_set_height(s_submit_btn, 172);
@@ -1413,17 +1434,35 @@ static void quiz_build_result_screen(void)
     s_result_all_good_label = NULL;
     s_result_wrong_row_used = 0;
     memset(s_result_wrong_rows, 0, sizeof(s_result_wrong_rows));
-{
+
     /* ===== Use submit result from server ===== */
     int show_score = (s_state.server_score >= 0) ? s_state.server_score : 0;
     int show_total = (s_state.server_total > 0) ? s_state.server_total : s_state.question_count;
-    if (show_total <= 0) show_total = 1;
+
+    /* Enhanced division by zero protection with comprehensive validation */
+    if (show_total <= 0)
+    {
+        show_total = 1;
+        ESP_LOGW(TAG, "Invalid total count, defaulting to 1");
+    }
+
+    /* Validate score is within valid range */
+    if (show_score < 0)
+    {
+        show_score = 0;
+    }
+    if (show_score > show_total)
+    {
+        show_score = show_total;
+        ESP_LOGW(TAG, "Score exceeds total, clamping to total");
+    }
 
     int wrong_cnt = (int)s_state.server_wrong_count;
     if (wrong_cnt <= 0 && show_total > show_score) wrong_cnt = show_total - show_score;
     if (wrong_cnt < 0) wrong_cnt = 0;
 
-    int acc = (show_score * 100) / show_total;
+    /* Safe division with guaranteed non-zero divisor */
+    int acc = (show_total > 0) ? (show_score * 100) / show_total : 0;
 
     /* ===== Title ===== */
     lv_obj_t *title = lv_label_create(s_result_scroll);
@@ -1610,7 +1649,7 @@ static void quiz_show_results_screen(void)
     quiz_build_result_screen();
     lv_scr_load(s_result_screen);
 
-    /* 姣忔杩涘叆缁撴灉椤甸兘鍥炲埌椤堕儴 */
+    /* 进入结果界面时自动滚动到顶部 */
     if (s_result_scroll)
     {
         lv_obj_scroll_to_y(s_result_scroll, 0, LV_ANIM_OFF);
@@ -1627,6 +1666,13 @@ static void quiz_handle_option(lv_event_t *e)
     int index = (int)(intptr_t)lv_event_get_user_data(e);
     if (index < 0 || index >= QUIZ_OPTION_COUNT)
     {
+        return;
+    }
+
+    /* Validate current question index to prevent array overflow */
+    if (s_state.current_question >= s_state.question_count)
+    {
+        ESP_LOGE(TAG, "Current question index out of bounds: %d", s_state.current_question);
         return;
     }
 
@@ -1662,18 +1708,22 @@ static void quiz_handle_option(lv_event_t *e)
         }
     }
 
+    /* Safe array access with bounds checking */
     s_state.answers[s_state.current_question] = (uint8_t)index;
 }
 
-/* 鎶?\r \n 鍙樼┖鏍硷紝骞跺帇缂╄繛缁┖鏍硷紝閬垮厤棰樺共/閫夐」鍑虹幇鈥滅┖琛岄珮搴︹€?*/
+/* 清理文本：移除\r\n空格，优化字符串格式，防止空白字符导致的显示问题 */
 static void quiz_sanitize_text(char *dst, size_t dst_sz, const char *src)
 {
     if (!dst || dst_sz == 0) return;
 
+    dst[0] = '\0';  /* Ensure destination string is null-terminated */
+    if (!src) return;
+
     size_t w = 0;
     int last_space = 1;
 
-    for (size_t r = 0; src && src[r] != '\0' && w + 1 < dst_sz; r++)
+    for (size_t r = 0; src[r] != '\0' && w < dst_sz - 1; r++)
     {
         char c = src[r];
         if (c == '\r' || c == '\n' || c == '\t') c = ' ';
@@ -1687,7 +1737,11 @@ static void quiz_sanitize_text(char *dst, size_t dst_sz, const char *src)
         {
             last_space = 0;
         }
-        dst[w++] = c;
+
+        /* Ensure we never write beyond buffer bounds */
+        if (w < dst_sz - 1) {
+            dst[w++] = c;
+        }
     }
 
     while (w > 0 && dst[w - 1] == ' ') w--;
@@ -1701,6 +1755,22 @@ static void quiz_load_question(uint8_t index)
         return;
     }
 
+    /* Null pointer checks for all UI objects to prevent crashes */
+    if (!s_progress_label || !s_question_label)
+    {
+        ESP_LOGE(TAG, "UI objects not initialized");
+        return;
+    }
+
+    for (int i = 0; i < QUIZ_OPTION_COUNT; i++)
+    {
+        if (!s_option_labels[i] || !s_option_btns[i])
+        {
+            ESP_LOGE(TAG, "Option UI object %d not initialized", i);
+            return;
+        }
+    }
+
     lv_label_set_text_fmt(
         s_progress_label,
         "%d / %d",
@@ -1708,7 +1778,7 @@ static void quiz_load_question(uint8_t index)
         s_state.question_count
     );
 
-    /* Question stem: sanitize to avoid invisible blank lines */
+    /* Question stem: 清理题干文本，防止空白字符导致的显示异常 */
     char stem_clean[QUIZ_TEXT_LEN + 1];
     quiz_sanitize_text(stem_clean, sizeof(stem_clean), s_state.questions[index].stem);
 
@@ -1716,7 +1786,7 @@ static void quiz_load_question(uint8_t index)
     snprintf(q_line, sizeof(q_line), "Q%d: %s", index + 1, stem_clean);
     lv_label_set_text(s_question_label, q_line);
 
-    /* Options text */
+    /* Options text: 显示每个选项的文本，并进行格式化处理 */
     for (int i = 0; i < QUIZ_OPTION_COUNT; i++)
     {
         char opt_clean[QUIZ_TEXT_LEN + 1];
@@ -1729,28 +1799,31 @@ static void quiz_load_question(uint8_t index)
             opt_clean
         );
 
-        /* Clear bottom button highlight */
+        /* Clear bottom button highlight: 清除所有选项按钮的选中状态 */
         lv_obj_clear_state(s_option_btns[i], LV_STATE_CHECKED);
 
-        /* Clear option label highlight */
+        /* Clear option label highlight: 清除选项文本的选中状态颜色 */
         lv_obj_set_style_text_color(s_option_labels[i], OPTION_TEXT_NORMAL_COLOR, 0);
     }
 
-    /* Restore selected option highlight if exists */
+    /* Restore selected option highlight if exists: 如果之前有选中选项，恢复高亮显示 */
     if (s_state.answers[index] < QUIZ_OPTION_COUNT)
     {
         uint8_t sel = s_state.answers[index];
         lv_obj_add_state(s_option_btns[sel], LV_STATE_CHECKED);
 
-        /* Restore option text highlight together with the button state. */
+        /* 同时恢复选项文本的选中状态颜色 */
         lv_obj_set_style_text_color(s_option_labels[sel], OPTION_TEXT_ACTIVE_COLOR, 0);
     }
 
     quiz_update_submit_button_text(index);
     quiz_set_submit_loading(false);
 
-    /* Always scroll back to the top when loading a new question. */
-    lv_obj_scroll_to_y(s_scroll, 0, LV_ANIM_OFF);
+    /* 加载新题目时自动滚动到顶部，确保用户能看到完整的题目内容 */
+    if (s_scroll)
+    {
+        lv_obj_scroll_to_y(s_scroll, 0, LV_ANIM_OFF);
+    }
 }
 
 static void quiz_finish_and_upload(void)
@@ -1818,6 +1891,7 @@ static void quiz_finish_and_upload(void)
     }
 }
 
+/* Toast 提示的隐藏回调函数：由定时器触发，隐藏提示消息 */
 static void quiz_hide_toast_cb(lv_timer_t *t)
 {
     LV_UNUSED(t);
@@ -1827,6 +1901,7 @@ static void quiz_hide_toast_cb(lv_timer_t *t)
     }
 }
 
+/* 返回首页按钮的回调函数：将屏幕切换回主界面 */
 static void quiz_back_to_home(lv_event_t *e)
 {
     LV_UNUSED(e);
