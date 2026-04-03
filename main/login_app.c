@@ -8,12 +8,16 @@
 #include "esp_err.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
+#include "freertos/task.h"
 #include "lvgl.h"
 LV_FONT_DECLARE(font_24_cn);
 #include "app_network.h"
+#include "app_ui_dispatch.h"
 #include "user_config.h"
 
 static const char *TAG = "login_app";
+
+#define LOGIN_APP_MAX_HTTP_BODY_SIZE (16 * 1024)
 
 
 /* UI objects */
@@ -43,6 +47,44 @@ static char s_password_buf[64];
 
 /* Roller state */
 static int s_current_digit;
+
+typedef struct
+{
+    char account[sizeof(s_account_buf)];
+    char password[sizeof(s_password_buf)];
+} login_app_auth_request_t;
+
+typedef struct
+{
+    esp_err_t err;
+    int http_status;
+    char token[192];
+    char account[sizeof(s_account_buf)];
+} login_app_auth_result_t;
+
+static void login_app_auth_task(void *arg);
+static void login_app_auth_complete(void *ctx);
+
+static int login_app_next_body_capacity(int current_capacity)
+{
+    if (current_capacity <= 0 || current_capacity >= LOGIN_APP_MAX_HTTP_BODY_SIZE)
+    {
+        return -1;
+    }
+
+    int new_capacity = current_capacity * 2;
+    if (new_capacity < current_capacity)
+    {
+        return -1;
+    }
+
+    if (new_capacity > LOGIN_APP_MAX_HTTP_BODY_SIZE)
+    {
+        new_capacity = LOGIN_APP_MAX_HTTP_BODY_SIZE;
+    }
+
+    return (new_capacity > current_capacity) ? new_capacity : -1;
+}
 
 static inline void set_cn_label_font(lv_obj_t *o)
 {
@@ -247,10 +289,22 @@ static esp_err_t login_app_do_auth(const char *username,
     int status = esp_http_client_get_status_code(client);
     *out_status = status;
 
+    if (content_length > LOGIN_APP_MAX_HTTP_BODY_SIZE)
+    {
+        ESP_LOGE(TAG, "Login response too large: %d bytes", content_length);
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+        return ESP_ERR_NO_MEM;
+    }
+
     int capacity = (content_length > 0) ? (content_length + 1) : 1024;
     if (capacity < 256)
     {
         capacity = 256;
+    }
+    else if (capacity > LOGIN_APP_MAX_HTTP_BODY_SIZE)
+    {
+        capacity = LOGIN_APP_MAX_HTTP_BODY_SIZE;
     }
 
     char *body = malloc(capacity);
@@ -266,7 +320,15 @@ static esp_err_t login_app_do_auth(const char *username,
     {
         if (total_read + 1 >= capacity)
         {
-            int new_capacity = capacity * 2;
+            int new_capacity = login_app_next_body_capacity(capacity);
+            if (new_capacity < 0)
+            {
+                ESP_LOGE(TAG, "Login response exceeded safe buffer limit");
+                free(body);
+                esp_http_client_close(client);
+                esp_http_client_cleanup(client);
+                return ESP_ERR_NO_MEM;
+            }
             char *grown = realloc(body, new_capacity);
             if (!grown)
             {
@@ -386,13 +448,67 @@ static void login_app_handle_submit(lv_event_t *e)
     login_app_set_loading(true);
     login_app_update_status("正在登录...");
 
-    int http_status = 0;
-    char token[192] = {0};
-    esp_err_t err = login_app_do_auth(account, password, &http_status, token, sizeof(token));
+    login_app_auth_request_t *req = malloc(sizeof(*req));
+    if (!req)
+    {
+        login_app_set_loading(false);
+        login_app_update_status("内存不足");
+        return;
+    }
+
+    memset(req, 0, sizeof(*req));
+    strncpy(req->account, account, sizeof(req->account) - 1);
+    strncpy(req->password, password, sizeof(req->password) - 1);
+
+    BaseType_t created = xTaskCreate(login_app_auth_task,
+                                     "login_auth",
+                                     6 * 1024,
+                                     req,
+                                     4,
+                                     NULL);
+    if (created != pdPASS)
+    {
+        free(req);
+        login_app_set_loading(false);
+        login_app_update_status("网络请求失败");
+    }
+}
+
+static void login_app_auth_task(void *arg)
+{
+    login_app_auth_request_t *req = (login_app_auth_request_t *)arg;
+    login_app_auth_result_t *result = malloc(sizeof(*result));
+    if (!result)
+    {
+        free(req);
+        app_ui_dispatch(login_app_auth_complete, NULL, portMAX_DELAY);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    memset(result, 0, sizeof(*result));
+    strncpy(result->account, req->account, sizeof(result->account) - 1);
+    result->err = login_app_do_auth(req->account,
+                                    req->password,
+                                    &result->http_status,
+                                    result->token,
+                                    sizeof(result->token));
+
+    free(req);
+    if (!app_ui_dispatch(login_app_auth_complete, result, portMAX_DELAY))
+    {
+        free(result);
+    }
+    vTaskDelete(NULL);
+}
+
+static void login_app_auth_complete(void *ctx)
+{
+    login_app_auth_result_t *result = (login_app_auth_result_t *)ctx;
 
     login_app_set_loading(false);
 
-    if (err != ESP_OK)
+    if (!result)
     {
         login_app_update_status("网络请求失败");
         if (s_result_cb)
@@ -402,9 +518,20 @@ static void login_app_handle_submit(lv_event_t *e)
         return;
     }
 
-    if (http_status >= 200 && http_status < 300)
+    if (result->err != ESP_OK)
     {
-        if (token[0] == '\0')
+        login_app_update_status("网络请求失败");
+        if (s_result_cb)
+        {
+            s_result_cb(false, NULL, NULL);
+        }
+        free(result);
+        return;
+    }
+
+    if (result->http_status >= 200 && result->http_status < 300)
+    {
+        if (result->token[0] == '\0')
         {
             login_app_update_status("登录成功，但凭证缺失");
             ESP_LOGE(TAG, "Login succeeded but token is empty");
@@ -412,16 +539,20 @@ static void login_app_handle_submit(lv_event_t *e)
             {
                 s_result_cb(false, NULL, NULL);
             }
+            free(result);
             return;
         }
 
         login_app_update_status("登录成功");
         if (s_result_cb)
         {
-            s_result_cb(true, token, account);
+            s_result_cb(true, result->token, result->account);
         }
+        free(result);
+        return;
     }
-    else if (http_status == 401)
+
+    if (result->http_status == 401)
     {
         login_app_update_status("账号或密码错误");
         s_account_buf[0] = '\0';
@@ -434,20 +565,17 @@ static void login_app_handle_submit(lv_event_t *e)
         {
             lv_textarea_set_text(s_password_ta, "");
         }
-        if (s_result_cb)
-        {
-            s_result_cb(false, NULL, NULL);
-        }
     }
     else
     {
         login_app_update_status("登录失败");
-        if (s_result_cb)
-        {
-            s_result_cb(false, NULL, NULL);
-        }
     }
-    
+
+    if (s_result_cb)
+    {
+        s_result_cb(false, NULL, NULL);
+    }
+    free(result);
 }
 
 static void login_app_build_ui(void)

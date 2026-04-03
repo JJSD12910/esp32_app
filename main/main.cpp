@@ -14,12 +14,14 @@
 
 extern "C" {
 #include "app_flow.h"
+#include "app_ui_dispatch.h"
 }
 
 // FreeRTOS相关头文件
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
+#include "freertos/queue.h"
 
 // ESP32硬件驱动相关头文件
 #include "driver/spi_master.h"
@@ -46,6 +48,7 @@ extern "C" {
 
 // 日志标签
 static const char *TAG = "example";
+static QueueHandle_t s_ui_job_queue = NULL;
 
 // LVGL互斥锁，用于保护LVGL API的并发访问
 static SemaphoreHandle_t lvgl_mux = NULL;
@@ -55,6 +58,12 @@ static uint16_t *lvgl_dma_buf = NULL;
 
 // LVGL刷新信号量，用于同步显示刷新操作
 static SemaphoreHandle_t lvgl_flush_semap;
+
+typedef struct
+{
+    app_ui_dispatch_fn_t fn;
+    void *ctx;
+} app_ui_job_t;
 
 // 旋转缓冲区，用于处理90度旋转显示
 #if (Rotated == USER_DISP_ROT_90)
@@ -105,8 +114,9 @@ void example_lvgl_port_task(void *arg);
  */
 static void example_backlight_loop_task(void *arg);
 static void power_Test(void *arg);
-static void tca9554_init(void);
+static esp_err_t tca9554_init(void);
 static void example_button_pwr_task(void *arg);
+static void example_process_ui_jobs(void);
 
 // LCD初始化命令序列
 static const axs15231b_lcd_init_cmd_t lcd_init_cmds[] = 
@@ -124,10 +134,42 @@ static const axs15231b_lcd_init_cmd_t lcd_init_cmds[] =
  */
 static bool example_notify_lvgl_flush_ready(esp_lcd_panel_io_handle_t panel_io, esp_lcd_panel_io_event_data_t *edata, void *user_ctx)
 {
-    BaseType_t TaskWoken;
+    BaseType_t TaskWoken = pdFALSE;
     // 从ISR中释放刷新信号量
     xSemaphoreGiveFromISR(lvgl_flush_semap, &TaskWoken);
-    return false;
+    return TaskWoken == pdTRUE;
+}
+
+extern "C" bool app_ui_dispatch(app_ui_dispatch_fn_t fn, void *ctx, TickType_t timeout_ticks)
+{
+    if (!s_ui_job_queue || !fn)
+    {
+        return false;
+    }
+
+    app_ui_job_t job = {
+        .fn = fn,
+        .ctx = ctx,
+    };
+
+    return xQueueSend(s_ui_job_queue, &job, timeout_ticks) == pdTRUE;
+}
+
+static void example_process_ui_jobs(void)
+{
+    if (!s_ui_job_queue)
+    {
+        return;
+    }
+
+    app_ui_job_t job;
+    while (xQueueReceive(s_ui_job_queue, &job, 0) == pdTRUE)
+    {
+        if (job.fn)
+        {
+            job.fn(job.ctx);
+        }
+    }
 }
 
 /**
@@ -149,13 +191,29 @@ static void power_Test(void *arg)
     vTaskDelete(NULL);
 }
 
-static void tca9554_init(void)
+static esp_err_t tca9554_init(void)
 {
     i2c_master_bus_handle_t tca9554_i2c_bus_ = NULL;
-    ESP_ERROR_CHECK(i2c_master_get_bus_handle(0, &tca9554_i2c_bus_));
-    esp_io_expander_new_i2c_tca9554(tca9554_i2c_bus_, ESP_IO_EXPANDER_I2C_TCA9554_ADDRESS_000, &io_expander);
-    esp_io_expander_set_dir(io_expander, IO_EXPANDER_PIN_NUM_6, IO_EXPANDER_OUTPUT);
-    esp_io_expander_set_level(io_expander, IO_EXPANDER_PIN_NUM_6, 1);
+    esp_err_t err = i2c_master_get_bus_handle(0, &tca9554_i2c_bus_);
+    if (err != ESP_OK || !tca9554_i2c_bus_)
+    {
+        return (err == ESP_OK) ? ESP_FAIL : err;
+    }
+
+    err = esp_io_expander_new_i2c_tca9554(tca9554_i2c_bus_, ESP_IO_EXPANDER_I2C_TCA9554_ADDRESS_000, &io_expander);
+    if (err != ESP_OK || !io_expander)
+    {
+        io_expander = NULL;
+        return (err == ESP_OK) ? ESP_FAIL : err;
+    }
+
+    err = esp_io_expander_set_dir(io_expander, IO_EXPANDER_PIN_NUM_6, IO_EXPANDER_OUTPUT);
+    if (err != ESP_OK)
+    {
+        return err;
+    }
+
+    return esp_io_expander_set_level(io_expander, IO_EXPANDER_PIN_NUM_6, 1);
 }
 
 static void example_button_pwr_task(void* arg)
@@ -169,7 +227,7 @@ static void example_button_pwr_task(void* arg)
         }
         else if (get_bit_button(even, 1)) // long press
         {
-            if (is_vbatpowerflag)
+            if (is_vbatpowerflag && io_expander)
             {
                 is_vbatpowerflag = false;
                 esp_io_expander_set_level(io_expander, IO_EXPANDER_PIN_NUM_6, 0);
@@ -201,10 +259,27 @@ extern "C" void app_main(void)
     
     // 创建LVGL刷新信号量
     lvgl_flush_semap = xSemaphoreCreateBinary();
+    if (!lvgl_flush_semap)
+    {
+        ESP_LOGE(TAG, "Failed to create LVGL flush semaphore");
+        return;
+    }
+
+    s_ui_job_queue = xQueueCreate(8, sizeof(app_ui_job_t));
+    if (!s_ui_job_queue)
+    {
+        ESP_LOGE(TAG, "Failed to create UI job queue");
+        return;
+    }
     
     // 初始化I2C总线（用于触摸控制器）
     i2c_master_Init();
-    tca9554_init();
+    esp_err_t expander_err = tca9554_init();
+    if (expander_err != ESP_OK)
+    {
+        ESP_LOGE(TAG, "TCA9554 init failed: %s", esp_err_to_name(expander_err));
+        io_expander = NULL;
+    }
     button_Init();
     xTaskCreatePinnedToCore(example_button_pwr_task, "example_button_pwr_task", 4 * 1024, NULL, 2, NULL, 1);
     xTaskCreatePinnedToCore(power_Test, "power_Test", 4 * 1024, NULL, 3, NULL, 1);
@@ -455,6 +530,7 @@ void example_lvgl_port_task(void *arg)
         // 获取LVGL互斥锁
         if (example_lvgl_lock(-1)) 
         {
+            example_process_ui_jobs();
             // 处理LVGL定时器和事件
             task_delay_ms = lv_timer_handler();
             
@@ -491,7 +567,12 @@ static void example_lvgl_touch_cb(lv_indev_drv_t *drv, lv_indev_data_t *data)
     memset(buff, 0, 32);  // 清空缓冲区
     
     // 通过I2C读取触摸数据
-    esp_err_t touch_err = i2c_master_write_read_dev(disp_touch_dev_handle, read_touchpad_cmd, 11, buff, 32);
+    if (!disp_touch_dev_handle)
+    {
+        data->state = LV_INDEV_STATE_REL;
+        return;
+    }
+    esp_err_t touch_err = i2c_master_touch_write_read(disp_touch_dev_handle, read_touchpad_cmd, 11, buff, 32);
     if (touch_err != ESP_OK)
     {
         // I2C read failed; report release state to avoid bogus coordinates
@@ -512,16 +593,16 @@ static void example_lvgl_touch_cb(lv_indev_drv_t *drv, lv_indev_data_t *data)
         
         #if (Rotated == USER_DISP_ROT_NONO)
         // 无旋转处理
-        if (pointX > EXAMPLE_LCD_V_RES) pointX = EXAMPLE_LCD_V_RES;
-        if (pointY > EXAMPLE_LCD_H_RES) pointY = EXAMPLE_LCD_H_RES;
+        if (pointX >= EXAMPLE_LCD_V_RES) pointX = EXAMPLE_LCD_V_RES - 1;
+        if (pointY >= EXAMPLE_LCD_H_RES) pointY = EXAMPLE_LCD_H_RES - 1;
         data->point.x = pointY;
-        data->point.y = (EXAMPLE_LCD_V_RES - pointX);
+        data->point.y = (EXAMPLE_LCD_V_RES - 1 - pointX);
         #else
         // 有旋转处理
-        if (pointX > EXAMPLE_LCD_H_RES) pointX = EXAMPLE_LCD_H_RES;
-        if (pointY > EXAMPLE_LCD_V_RES) pointY = EXAMPLE_LCD_V_RES;
-        data->point.x = (EXAMPLE_LCD_H_RES - pointX);
-        data->point.y = (EXAMPLE_LCD_V_RES - pointY);
+        if (pointX >= EXAMPLE_LCD_H_RES) pointX = EXAMPLE_LCD_H_RES - 1;
+        if (pointY >= EXAMPLE_LCD_V_RES) pointY = EXAMPLE_LCD_V_RES - 1;
+        data->point.x = (EXAMPLE_LCD_H_RES - 1 - pointX);
+        data->point.y = (EXAMPLE_LCD_V_RES - 1 - pointY);
         #endif
     }
     else  // 未检测到触摸
