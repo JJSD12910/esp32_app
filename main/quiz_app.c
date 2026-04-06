@@ -176,6 +176,7 @@ static void quiz_handle_start_test(lv_event_t *e);
 static void quiz_handle_view_results(lv_event_t *e);
 static void quiz_handle_option(lv_event_t *e);
 static void quiz_handle_submit(lv_event_t *e);
+static void quiz_back_to_home(lv_event_t *e);
 static void quiz_hide_toast_cb(lv_timer_t *t);
 static esp_err_t quiz_http_get_questions_for_token(const char *auth_token, char **out_json, int *out_status, char *out_reason, size_t out_reason_size);
 static esp_err_t quiz_http_post_single_answer_for_attempt(const char *auth_token,
@@ -300,6 +301,17 @@ static void quiz_show_toast_cn(const char *text, uint32_t duration_ms)
 {
     quiz_show_toast(text, duration_ms);
     quiz_set_cn_font_for_label(s_toast_label);
+}
+
+static void quiz_reset_exam_state(void)
+{
+    memset(&s_state, 0, sizeof(s_state));
+    memset(s_state.answers, 0xFF, sizeof(s_state.answers));
+    memset(s_state.submitted_answers, 0xFF, sizeof(s_state.submitted_answers));
+    s_state.attempt_started_tick = 0;
+    s_quiz_id[0] = '\0';
+    s_attempt_id[0] = '\0';
+    quiz_reset_server_result();
 }
 
 static void quiz_server_result_reset_to_defaults(quiz_server_result_t *result, int default_total)
@@ -970,8 +982,7 @@ static bool quiz_parse_questions(const char *json)
         return false;
     }
 
-    memset(&s_state, 0, sizeof(s_state));
-    s_attempt_id[0] = '\0';
+    quiz_reset_exam_state();
 
     cJSON *exam_id_js = cJSON_GetObjectItemCaseSensitive(data, "exam_id");
     cJSON *attempt_id_js = cJSON_GetObjectItemCaseSensitive(data, "attempt_id");
@@ -1085,6 +1096,7 @@ static bool quiz_download_questions(void)
 
     if (!ok)
     {
+        quiz_reset_exam_state();
         ESP_LOGE(TAG, "Parse JSON failed, abort UI");
         quiz_show_toast_cn("数据无效", 1800);
         return false;  // Block UI flow on failure
@@ -1300,12 +1312,14 @@ static void quiz_download_complete(void *ctx)
 
     if (!result)
     {
+        quiz_reset_exam_state();
         quiz_show_toast_cn("下载失败", 1800);
         return;
     }
 
     if (result->err != ESP_OK || !result->json)
     {
+        quiz_reset_exam_state();
         ESP_LOGE(TAG, "Download request failed: err=%s status=%d reason=%s",
                  esp_err_to_name(result->err), result->http_status, result->reason);
         if (result->http_status == 401)
@@ -1344,6 +1358,7 @@ static void quiz_download_complete(void *ctx)
 
     if (!ok)
     {
+        quiz_reset_exam_state();
         ESP_LOGE(TAG, "Parse JSON failed, abort UI");
         quiz_show_toast_cn("数据无效", 1800);
     }
@@ -1901,7 +1916,7 @@ static void quiz_create_result_screen(void)
         s_result_screen = NULL;
         return;
     }
-    lv_obj_set_size(s_result_scroll, 640, 172);
+    lv_obj_set_size(s_result_scroll, 640, 126);
     lv_obj_align(s_result_scroll, LV_ALIGN_TOP_MID, 0, 0);
     lv_obj_set_scroll_dir(s_result_scroll, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(s_result_scroll, LV_SCROLLBAR_MODE_AUTO);
@@ -1923,6 +1938,11 @@ static void quiz_build_result_screen(void)
     }
 
     quiz_create_result_screen();
+    if (!s_result_screen || !s_result_scroll)
+    {
+        ESP_LOGE(TAG, "Result screen is incomplete");
+        return;
+    }
 
     s_result_wrong_row_used = 0;
     memset(s_result_wrong_rows, 0, sizeof(s_result_wrong_rows));
@@ -2125,6 +2145,44 @@ static void quiz_build_result_screen(void)
 
         quiz_add_wrong_row(wrong->question_no > 0 ? wrong->question_no : (uint8_t)(i + 1), your_c, ans_c);
     }
+
+    lv_obj_t *bottom_bar = lv_obj_create(s_result_screen);
+    if (!bottom_bar)
+    {
+        ESP_LOGE(TAG, "Failed to create result bottom bar");
+        return;
+    }
+    lv_obj_set_size(bottom_bar, 640, 46);
+    lv_obj_align(bottom_bar, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_set_flex_flow(bottom_bar, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(bottom_bar, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_all(bottom_bar, 6, 0);
+    lv_obj_set_style_bg_color(bottom_bar, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(bottom_bar, LV_OPA_100, 0);
+    lv_obj_set_style_border_width(bottom_bar, 0, 0);
+    lv_obj_clear_flag(bottom_bar, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *back_btn = lv_btn_create(bottom_bar);
+    if (!back_btn)
+    {
+        ESP_LOGE(TAG, "Failed to create result back button");
+        return;
+    }
+    lv_obj_set_size(back_btn, 140, 34);
+    lv_obj_add_event_cb(back_btn, quiz_back_to_home, LV_EVENT_CLICKED, NULL);
+    lv_obj_set_style_bg_color(back_btn, lv_palette_main(LV_PALETTE_BLUE), LV_PART_MAIN);
+    lv_obj_set_style_radius(back_btn, 8, LV_PART_MAIN);
+    lv_obj_set_style_border_width(back_btn, 0, LV_PART_MAIN);
+
+    lv_obj_t *back_lbl = lv_label_create(back_btn);
+    if (!back_lbl)
+    {
+        ESP_LOGE(TAG, "Failed to create result back label");
+        return;
+    }
+    lv_label_set_text(back_lbl, "杩斿洖");
+    quiz_set_cn_font_for_label(back_lbl);
+    lv_obj_center(back_lbl);
 }
 
 static void quiz_show_results_screen(void)
@@ -2396,6 +2454,7 @@ static void quiz_finish_and_upload(void)
 #endif
 static void quiz_hide_toast_cb(lv_timer_t *t)
 {
+    s_toast_timer = NULL;
     LV_UNUSED(t);
     if (s_toast_label)
     {
@@ -2404,7 +2463,6 @@ static void quiz_hide_toast_cb(lv_timer_t *t)
 }
 
 /* 返回首页按钮的回调函数：将屏幕切换回主界面 */
-#if 0
 static void quiz_back_to_home(lv_event_t *e)
 {
     LV_UNUSED(e);
@@ -2413,7 +2471,6 @@ static void quiz_back_to_home(lv_event_t *e)
         lv_scr_load(s_home_screen);
     }
 }
-#endif
 
 static void quiz_handle_submit(lv_event_t *e)
 {
@@ -2497,12 +2554,7 @@ void quiz_app_create_ui(void)
         return;
     }
 
-    memset(&s_state, 0, sizeof(s_state));
-    memset(s_state.answers, 0xFF, sizeof(s_state.answers));
-    memset(s_state.submitted_answers, 0xFF, sizeof(s_state.submitted_answers));
-    s_state.final_submit_success = false;
-    s_state.attempt_started_tick = 0;
-    quiz_reset_server_result();
+    quiz_reset_exam_state();
 
     quiz_create_home_screen();
     quiz_build_test_screen();
