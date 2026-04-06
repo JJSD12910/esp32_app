@@ -8,6 +8,8 @@
 EventGroupHandle_t boot_groups;
 EventGroupHandle_t pwr_groups;
 
+static const char *TAG = "button_bsp";
+
 static Button button1;    //申请按键
 #define USER_KEY_1 0      //实际的GPIO
 #define button1_id 1      //按键的ID
@@ -72,6 +74,11 @@ void button_Init(void)
 {
   boot_groups = xEventGroupCreate();
   pwr_groups = xEventGroupCreate();
+  if (!boot_groups || !pwr_groups)
+  {
+    ESP_LOGE(TAG, "Failed to create button event groups");
+    return;
+  }
   gpio_init();
 
   button_init(&button1, read_button_GPIO, button1_active , button1_id);       // 初始化 初始化对象 回调函数 触发电平 按键ID
@@ -107,12 +114,12 @@ void button_Init(void)
 /*连续点击*/
 static void on_button2_press_repeat(Button* btn_handle)
 {
-  xEventGroupSetBits(pwr_groups,set_bit_button(0));
+  if (pwr_groups) xEventGroupSetBits(pwr_groups,set_bit_button(0));
 }
 /*单击*/
 static void on_button2_single_click(Button* btn_handle)
 {
-  xEventGroupSetBits(pwr_groups,set_bit_button(0));
+  if (pwr_groups) xEventGroupSetBits(pwr_groups,set_bit_button(0));
 }
 /*双击*/
 static void on_button2_double_click(Button* btn_handle)
@@ -122,7 +129,7 @@ static void on_button2_double_click(Button* btn_handle)
 /*长按*/
 static void on_button2_long_press_start(Button* btn_handle)
 {
-  xEventGroupSetBits(pwr_groups,set_bit_button(1));
+  if (pwr_groups) xEventGroupSetBits(pwr_groups,set_bit_button(1));
 }
 /*长按保持*/
 static void on_button2_long_press_hold(Button* btn_handle)
@@ -137,7 +144,7 @@ static void on_button2_press_down(Button* btn_handle)
 /*弹起*/
 static void on_button2_press_up(Button* btn_handle)
 {
-  xEventGroupSetBits(pwr_groups,set_bit_button(2));
+  if (pwr_groups) xEventGroupSetBits(pwr_groups,set_bit_button(2));
 }
 
 /*boot button*/
@@ -145,25 +152,25 @@ static void on_button2_press_up(Button* btn_handle)
 /*单击*/
 static void on_boot_single_click(Button* btn_handle)
 {
-  xEventGroupSetBits(boot_groups,set_bit_button(0));
+  if (boot_groups) xEventGroupSetBits(boot_groups,set_bit_button(0));
 }
 
 /*双击*/
 static void on_boot_double_click(Button* btn_handle)
 {
-  xEventGroupSetBits(boot_groups,set_bit_button(1));
+  if (boot_groups) xEventGroupSetBits(boot_groups,set_bit_button(1));
 }
 
 /*长按*/
 static void on_boot_long_press_start(Button* btn_handle)
 {
-  xEventGroupSetBits(boot_groups,set_bit_button(2));
+  if (boot_groups) xEventGroupSetBits(boot_groups,set_bit_button(2));
 }
 
 /*弹起*/
 static void on_boot_press_up(Button* btn_handle)
 {
-  xEventGroupSetBits(boot_groups,set_bit_button(3));
+  if (boot_groups) xEventGroupSetBits(boot_groups,set_bit_button(3));
 }
 
 

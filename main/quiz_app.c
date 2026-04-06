@@ -11,11 +11,12 @@
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_http_client.h"
+#include "freertos/task.h"
 #include "lvgl.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 
 #include "app_network.h"
+#include "app_ui_dispatch.h"
 #include "user_config.h"
 LV_FONT_DECLARE(font_24_cn);
 
@@ -79,6 +80,8 @@ typedef struct
 
 static const char *TAG = "quiz_app";
 
+#define QUIZ_APP_MAX_HTTP_BODY_SIZE (32 * 1024)
+
 static quiz_state_t s_state;
 static char s_user_id[16];
 static char s_quiz_id[40];
@@ -99,7 +102,6 @@ static lv_obj_t *s_question_label;
 static lv_obj_t *s_option_labels[QUIZ_OPTION_COUNT];
 
 /* bottom buttons */
-static lv_obj_t *s_bottom_bar;
 static lv_obj_t *s_option_btns[QUIZ_OPTION_COUNT];
 static lv_obj_t *s_submit_btn;
 static lv_obj_t *s_submit_label;
@@ -112,18 +114,62 @@ typedef struct
     lv_obj_t *answer_value_label;
 } quiz_wrong_row_ui_t;
 
-static lv_obj_t *s_result_score_value_label;
-static lv_obj_t *s_result_accuracy_value_label;
-static lv_obj_t *s_result_time_value_label;
-static lv_obj_t *s_result_correct_value_label;
-static lv_obj_t *s_result_wrong_value_label;
-static lv_obj_t *s_result_all_good_label;
 static quiz_wrong_row_ui_t s_result_wrong_rows[QUIZ_MAX_QUESTIONS];
 static uint8_t s_result_wrong_row_used;
 
 /* toast */
 static lv_obj_t *s_toast_label;
 static lv_timer_t *s_toast_timer;
+static bool s_download_inflight;
+
+typedef struct
+{
+    int server_score;
+    int server_total;
+    uint8_t server_wrong_count;
+    bool has_result;
+    quiz_wrong_item_t server_wrong[QUIZ_MAX_QUESTIONS];
+} quiz_server_result_t;
+
+typedef struct
+{
+    char auth_token[192];
+} quiz_download_request_t;
+
+typedef struct
+{
+    esp_err_t err;
+    int http_status;
+    char reason[128];
+    char *json;
+} quiz_download_result_t;
+
+typedef struct
+{
+    uint8_t question_index;
+    uint8_t answer;
+    uint8_t question_count;
+    bool is_final_question;
+    char auth_token[192];
+    char attempt_id[40];
+    char *single_payload;
+    char *submit_payload;
+} quiz_submit_request_t;
+
+typedef struct
+{
+    uint8_t question_index;
+    uint8_t answer;
+    bool is_final_question;
+    int attempts_used;
+    esp_err_t answer_err;
+    int answer_status;
+    char answer_reason[160];
+    esp_err_t final_err;
+    int final_status;
+    char final_reason[160];
+    quiz_server_result_t server_result;
+} quiz_submit_result_t;
 
 static void quiz_handle_download(lv_event_t *e);
 static void quiz_handle_start_test(lv_event_t *e);
@@ -131,10 +177,21 @@ static void quiz_handle_view_results(lv_event_t *e);
 static void quiz_handle_option(lv_event_t *e);
 static void quiz_handle_submit(lv_event_t *e);
 static void quiz_hide_toast_cb(lv_timer_t *t);
-static void quiz_back_to_home(lv_event_t *e);
-static esp_err_t quiz_http_get_questions(char **out_json, int *out_status, char *out_reason, size_t out_reason_size);
-static esp_err_t quiz_http_post_single_answer(const char *payload, int *out_status, char *out_reason, size_t out_reason_size);
-static esp_err_t quiz_http_post_results(const char *payload, int *out_status, char *out_reason, size_t out_reason_size);
+static esp_err_t quiz_http_get_questions_for_token(const char *auth_token, char **out_json, int *out_status, char *out_reason, size_t out_reason_size);
+static esp_err_t quiz_http_post_single_answer_for_attempt(const char *auth_token,
+                                                          const char *attempt_id,
+                                                          const char *payload,
+                                                          int *out_status,
+                                                          char *out_reason,
+                                                          size_t out_reason_size);
+static esp_err_t quiz_http_post_results_for_attempt(const char *auth_token,
+                                                    const char *attempt_id,
+                                                    const char *payload,
+                                                    int *out_status,
+                                                    char *out_reason,
+                                                    size_t out_reason_size,
+                                                    quiz_server_result_t *out_server_result,
+                                                    int default_total);
 static esp_err_t quiz_http_request(const char *path,
                                    esp_http_client_method_t method,
                                    const char *auth_token,
@@ -143,10 +200,10 @@ static esp_err_t quiz_http_request(const char *path,
                                    char **out_body);
 static bool quiz_pick_first_exam_id(const char *json, char *exam_id, size_t exam_id_size);
 static bool quiz_extract_error_reason(const char *json, char *out_reason, size_t out_reason_size);
+static bool quiz_parse_questions(const char *json);
 static char *quiz_build_single_answer_payload(uint8_t question_index, bool is_final_question);
 static char *quiz_build_submit_payload(void);
 static uint32_t quiz_get_elapsed_duration_sec(void);
-static bool quiz_submit_question_answer(uint8_t question_index, bool is_final_question);
 static void quiz_set_submit_loading(bool loading);
 static void quiz_update_submit_button_text(uint8_t index);
 static void quiz_prepare_local_result(void);
@@ -154,10 +211,38 @@ static void quiz_load_question(uint8_t index);
 static void quiz_create_result_screen(void);
 static void quiz_build_result_screen(void);
 static void quiz_show_results_screen(void);
-static void quiz_finish_and_upload(void);
 static void quiz_reset_server_result(void);
 static bool quiz_has_server_result(void);
+static bool quiz_has_viewable_result(void);
 static void quiz_add_wrong_row(uint8_t qno, char your_c, char ans_c);
+static void quiz_download_task(void *arg);
+static void quiz_download_complete(void *ctx);
+static void quiz_submit_task(void *arg);
+static void quiz_submit_complete(void *ctx);
+static void quiz_server_result_reset_to_defaults(quiz_server_result_t *result, int default_total);
+static bool quiz_parse_submit_result_json(const char *json, quiz_server_result_t *out_result, int default_total);
+static void quiz_apply_server_result(const quiz_server_result_t *result);
+
+static int quiz_next_body_capacity(int current_capacity)
+{
+    if (current_capacity <= 0 || current_capacity >= QUIZ_APP_MAX_HTTP_BODY_SIZE)
+    {
+        return -1;
+    }
+
+    int new_capacity = current_capacity * 2;
+    if (new_capacity < current_capacity)
+    {
+        return -1;
+    }
+
+    if (new_capacity > QUIZ_APP_MAX_HTTP_BODY_SIZE)
+    {
+        new_capacity = QUIZ_APP_MAX_HTTP_BODY_SIZE;
+    }
+
+    return (new_capacity > current_capacity) ? new_capacity : -1;
+}
 
 static inline void quiz_set_cn_font_for_label(lv_obj_t *obj)
 {
@@ -205,6 +290,120 @@ static void quiz_show_toast_cn(const char *text, uint32_t duration_ms)
 {
     quiz_show_toast(text, duration_ms);
     quiz_set_cn_font_for_label(s_toast_label);
+}
+
+static void quiz_server_result_reset_to_defaults(quiz_server_result_t *result, int default_total)
+{
+    if (!result)
+    {
+        return;
+    }
+
+    memset(result, 0, sizeof(*result));
+    result->server_score = -1;
+    result->server_total = default_total;
+    result->has_result = false;
+}
+
+static bool quiz_parse_submit_result_json(const char *json, quiz_server_result_t *out_result, int default_total)
+{
+    if (!out_result)
+    {
+        return false;
+    }
+
+    quiz_server_result_reset_to_defaults(out_result, default_total);
+    if (!json || json[0] == '\0')
+    {
+        return false;
+    }
+
+    cJSON *root = cJSON_Parse(json);
+    if (!root)
+    {
+        return false;
+    }
+
+    cJSON *data = cJSON_GetObjectItemCaseSensitive(root, "data");
+    if (cJSON_IsObject(data))
+    {
+        cJSON *score_js = cJSON_GetObjectItemCaseSensitive(data, "score");
+        cJSON *total_js = cJSON_GetObjectItemCaseSensitive(data, "total");
+        cJSON *wrong_count_js = cJSON_GetObjectItemCaseSensitive(data, "wrong_count");
+        cJSON *wrong_items_js = cJSON_GetObjectItemCaseSensitive(data, "wrong_items");
+
+        if (cJSON_IsNumber(score_js))
+        {
+            out_result->server_score = score_js->valueint;
+        }
+        if (cJSON_IsNumber(total_js))
+        {
+            out_result->server_total = total_js->valueint;
+        }
+
+        if (cJSON_IsArray(wrong_items_js))
+        {
+            cJSON *wrong_item = NULL;
+            cJSON_ArrayForEach(wrong_item, wrong_items_js)
+            {
+                if (out_result->server_wrong_count >= QUIZ_MAX_QUESTIONS)
+                {
+                    break;
+                }
+
+                if (!cJSON_IsObject(wrong_item))
+                {
+                    continue;
+                }
+
+                quiz_wrong_item_t *dst = &out_result->server_wrong[out_result->server_wrong_count];
+                cJSON *question_id_js = cJSON_GetObjectItemCaseSensitive(wrong_item, "question_id");
+                cJSON *question_no_js = cJSON_GetObjectItemCaseSensitive(wrong_item, "question_no");
+                cJSON *selected_index_js = cJSON_GetObjectItemCaseSensitive(wrong_item, "selected_index");
+                cJSON *correct_index_js = cJSON_GetObjectItemCaseSensitive(wrong_item, "correct_index");
+
+                memset(dst, 0, sizeof(*dst));
+                if (cJSON_IsString(question_id_js) && question_id_js->valuestring)
+                {
+                    strncpy(dst->id, question_id_js->valuestring, sizeof(dst->id) - 1);
+                    dst->id[sizeof(dst->id) - 1] = '\0';
+                }
+                dst->question_no = cJSON_IsNumber(question_no_js) ? (uint8_t)question_no_js->valueint : (uint8_t)(out_result->server_wrong_count + 1);
+                dst->your = cJSON_IsNumber(selected_index_js) ? selected_index_js->valueint : -1;
+                dst->correct = cJSON_IsNumber(correct_index_js) ? correct_index_js->valueint : -1;
+                out_result->server_wrong_count++;
+            }
+        }
+
+        if (cJSON_IsNumber(wrong_count_js) && wrong_count_js->valueint != out_result->server_wrong_count)
+        {
+            ESP_LOGW(TAG, "wrong_count mismatch: api=%d parsed=%d", wrong_count_js->valueint, out_result->server_wrong_count);
+        }
+    }
+
+    cJSON_Delete(root);
+    out_result->has_result = (out_result->server_score >= 0 && out_result->server_total > 0);
+    return out_result->has_result;
+}
+
+static void quiz_apply_server_result(const quiz_server_result_t *result)
+{
+    if (!result)
+    {
+        quiz_reset_server_result();
+        return;
+    }
+
+    s_state.server_score = result->server_score;
+    s_state.server_total = result->server_total;
+    s_state.server_wrong_count = result->server_wrong_count;
+    memset(s_state.server_wrong, 0, sizeof(s_state.server_wrong));
+    if (result->server_wrong_count > 0)
+    {
+        memcpy(s_state.server_wrong,
+               result->server_wrong,
+               result->server_wrong_count * sizeof(result->server_wrong[0]));
+    }
 }
 
 static void quiz_set_submit_loading(bool loading)
@@ -309,10 +508,22 @@ static esp_err_t quiz_http_request(const char *path,
     int content_length = esp_http_client_fetch_headers(client);
     *out_status = esp_http_client_get_status_code(client);
 
+    if (content_length > QUIZ_APP_MAX_HTTP_BODY_SIZE)
+    {
+        ESP_LOGE(TAG, "HTTP response too large: %d bytes", content_length);
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+        return ESP_ERR_NO_MEM;
+    }
+
     int capacity = (content_length > 0) ? (content_length + 1) : 1024;
     if (capacity < 256)
     {
         capacity = 256;
+    }
+    else if (capacity > QUIZ_APP_MAX_HTTP_BODY_SIZE)
+    {
+        capacity = QUIZ_APP_MAX_HTTP_BODY_SIZE;
     }
 
     char *buffer = malloc(capacity);
@@ -328,7 +539,16 @@ static esp_err_t quiz_http_request(const char *path,
     {
         if (total_read + 1 >= capacity)
         {
-            int new_capacity = capacity * 2;
+            int new_capacity = quiz_next_body_capacity(capacity);
+            if (new_capacity < 0)
+            {
+                ESP_LOGE(TAG, "HTTP response exceeded safe buffer limit");
+                free(buffer);
+                esp_http_client_close(client);
+                esp_http_client_cleanup(client);
+                *out_body = NULL;
+                return ESP_ERR_NO_MEM;
+            }
             char *grown = realloc(buffer, new_capacity);
             if (!grown)
             {
@@ -470,9 +690,9 @@ static bool quiz_pick_first_exam_id(const char *json, char *exam_id, size_t exam
     return true;
 }
 
-static esp_err_t quiz_http_get_questions(char **out_json, int *out_status, char *out_reason, size_t out_reason_size)
+static esp_err_t quiz_http_get_questions_for_token(const char *auth_token, char **out_json, int *out_status, char *out_reason, size_t out_reason_size)
 {
-    if (!out_json || !out_status || !out_reason || out_reason_size == 0)
+    if (!auth_token || !out_json || !out_status || !out_reason || out_reason_size == 0)
     {
         return ESP_ERR_INVALID_ARG;
     }
@@ -481,7 +701,7 @@ static esp_err_t quiz_http_get_questions(char **out_json, int *out_status, char 
     *out_status = 0;
     out_reason[0] = '\0';
 
-    if (s_auth_token[0] == '\0')
+    if (auth_token[0] == '\0')
     {
         *out_status = 401;
         strncpy(out_reason, "登录凭证缺失，请重新登录", out_reason_size - 1);
@@ -493,7 +713,7 @@ static esp_err_t quiz_http_get_questions(char **out_json, int *out_status, char 
     int list_status = 0;
     esp_err_t err = quiz_http_request("/api/client/exams?limit=20&offset=0",
                                       HTTP_METHOD_GET,
-                                      s_auth_token,
+                                      auth_token,
                                       NULL,
                                       &list_status,
                                       &list_json);
@@ -501,7 +721,6 @@ static esp_err_t quiz_http_get_questions(char **out_json, int *out_status, char 
     {
         return err;
     }
-    ESP_LOGI(TAG, "Exam list status=%d", list_status);
 
     if (list_status < 200 || list_status >= 300)
     {
@@ -526,10 +745,6 @@ static esp_err_t quiz_http_get_questions(char **out_json, int *out_status, char 
     }
     free(list_json);
 
-    strncpy(s_quiz_id, exam_id, sizeof(s_quiz_id) - 1);
-    s_quiz_id[sizeof(s_quiz_id) - 1] = '\0';
-    s_attempt_id[0] = '\0';
-
     char start_path[128];
     snprintf(start_path, sizeof(start_path), "/api/client/exams/%s/start", exam_id);
 
@@ -537,7 +752,7 @@ static esp_err_t quiz_http_get_questions(char **out_json, int *out_status, char 
     int start_status = 0;
     err = quiz_http_request(start_path,
                             HTTP_METHOD_POST,
-                            s_auth_token,
+                            auth_token,
                             "{}",
                             &start_status,
                             &start_json);
@@ -545,7 +760,6 @@ static esp_err_t quiz_http_get_questions(char **out_json, int *out_status, char 
     {
         return err;
     }
-    ESP_LOGI(TAG, "Exam start status=%d exam_id=%s", start_status, exam_id);
 
     *out_status = start_status;
     if (start_status < 200 || start_status >= 300)
@@ -563,7 +777,12 @@ static esp_err_t quiz_http_get_questions(char **out_json, int *out_status, char 
     return ESP_OK;
 }
 
-static esp_err_t quiz_http_post_single_answer(const char *payload, int *out_status, char *out_reason, size_t out_reason_size)
+static esp_err_t quiz_http_post_single_answer_for_attempt(const char *auth_token,
+                                                          const char *attempt_id,
+                                                          const char *payload,
+                                                          int *out_status,
+                                                          char *out_reason,
+                                                          size_t out_reason_size)
 {
     if (!payload || !out_status || !out_reason || out_reason_size == 0)
     {
@@ -572,7 +791,7 @@ static esp_err_t quiz_http_post_single_answer(const char *payload, int *out_stat
     *out_status = 0;
     out_reason[0] = '\0';
 
-    if (s_auth_token[0] == '\0')
+    if (!auth_token || auth_token[0] == '\0')
     {
         *out_status = 401;
         strncpy(out_reason, "登录凭证缺失，请重新登录", out_reason_size - 1);
@@ -580,7 +799,7 @@ static esp_err_t quiz_http_post_single_answer(const char *payload, int *out_stat
         return ESP_ERR_INVALID_STATE;
     }
 
-    if (s_attempt_id[0] == '\0')
+    if (!attempt_id || attempt_id[0] == '\0')
     {
         *out_status = 404;
         strncpy(out_reason, "作答编号缺失，请重新下载", out_reason_size - 1);
@@ -589,25 +808,25 @@ static esp_err_t quiz_http_post_single_answer(const char *payload, int *out_stat
     }
 
     char answer_path[160];
-    snprintf(answer_path, sizeof(answer_path), APP_API_ATTEMPT_ANSWER_PATH_FMT, s_attempt_id);
+    snprintf(answer_path, sizeof(answer_path), APP_API_ATTEMPT_ANSWER_PATH_FMT, attempt_id);
 
     char *resp_json = NULL;
     esp_err_t err = quiz_http_request(answer_path,
                                       HTTP_METHOD_POST,
-                                      s_auth_token,
+                                      auth_token,
                                       payload,
                                       out_status,
                                       &resp_json);
     if (err != ESP_OK)
     {
-        if (resp_json)  /* Fix: Free memory on error */
+        if (resp_json)
         {
             free(resp_json);
         }
         return err;
     }
 
-    ESP_LOGI(TAG, "Single answer submit status=%d attempt_id=%s", *out_status, s_attempt_id);
+    ESP_LOGI(TAG, "Single answer submit status=%d attempt_id=%s", *out_status, attempt_id);
     if (*out_status < 200 || *out_status >= 300)
     {
         if (!quiz_extract_error_reason(resp_json, out_reason, out_reason_size))
@@ -631,7 +850,14 @@ static esp_err_t quiz_http_post_single_answer(const char *payload, int *out_stat
     return ESP_OK;
 }
 
-static esp_err_t quiz_http_post_results(const char *payload, int *out_status, char *out_reason, size_t out_reason_size)
+static esp_err_t quiz_http_post_results_for_attempt(const char *auth_token,
+                                                    const char *attempt_id,
+                                                    const char *payload,
+                                                    int *out_status,
+                                                    char *out_reason,
+                                                    size_t out_reason_size,
+                                                    quiz_server_result_t *out_server_result,
+                                                    int default_total)
 {
     if (!payload || !out_status || !out_reason || out_reason_size == 0)
     {
@@ -640,7 +866,7 @@ static esp_err_t quiz_http_post_results(const char *payload, int *out_status, ch
     *out_status = 0;
     out_reason[0] = '\0';
 
-    if (s_auth_token[0] == '\0')
+    if (!auth_token || auth_token[0] == '\0')
     {
         *out_status = 401;
         strncpy(out_reason, "登录凭证缺失，请重新登录", out_reason_size - 1);
@@ -648,7 +874,7 @@ static esp_err_t quiz_http_post_results(const char *payload, int *out_status, ch
         return ESP_ERR_INVALID_STATE;
     }
 
-    if (s_attempt_id[0] == '\0')
+    if (!attempt_id || attempt_id[0] == '\0')
     {
         *out_status = 404;
         strncpy(out_reason, "作答编号缺失，请重新下载", out_reason_size - 1);
@@ -657,25 +883,25 @@ static esp_err_t quiz_http_post_results(const char *payload, int *out_status, ch
     }
 
     char submit_path[160];
-    snprintf(submit_path, sizeof(submit_path), "/api/client/attempts/%s/submit", s_attempt_id);
+    snprintf(submit_path, sizeof(submit_path), "/api/client/attempts/%s/submit", attempt_id);
 
     char *resp_json = NULL;
     esp_err_t err = quiz_http_request(submit_path,
                                       HTTP_METHOD_POST,
-                                      s_auth_token,
+                                      auth_token,
                                       payload,
                                       out_status,
                                       &resp_json);
     if (err != ESP_OK)
     {
-        if (resp_json)  /* Fix: Free memory on error */
+        if (resp_json)
         {
             free(resp_json);
         }
         return err;
     }
 
-    ESP_LOGI(TAG, "Submit status=%d attempt_id=%s", *out_status, s_attempt_id);
+    ESP_LOGI(TAG, "Submit status=%d attempt_id=%s", *out_status, attempt_id);
     if (*out_status < 200 || *out_status >= 300)
     {
         if (!quiz_extract_error_reason(resp_json, out_reason, out_reason_size))
@@ -695,70 +921,15 @@ static esp_err_t quiz_http_post_results(const char *payload, int *out_status, ch
         return ESP_FAIL;
     }
 
-    quiz_reset_server_result();
-    if (resp_json && resp_json[0] != '\0')
+    if (out_server_result)
     {
-        cJSON *root = cJSON_Parse(resp_json);
-        if (root)
-        {
-            cJSON *data = cJSON_GetObjectItemCaseSensitive(root, "data");
-            if (cJSON_IsObject(data))
-            {
-                cJSON *score_js = cJSON_GetObjectItemCaseSensitive(data, "score");
-                cJSON *total_js = cJSON_GetObjectItemCaseSensitive(data, "total");
-                cJSON *wrong_count_js = cJSON_GetObjectItemCaseSensitive(data, "wrong_count");
-                cJSON *wrong_items_js = cJSON_GetObjectItemCaseSensitive(data, "wrong_items");
-
-                if (cJSON_IsNumber(score_js))
-                {
-                    s_state.server_score = score_js->valueint;
-                }
-                if (cJSON_IsNumber(total_js))
-                {
-                    s_state.server_total = total_js->valueint;
-                }
-
-                if (cJSON_IsArray(wrong_items_js))
-                {
-                    cJSON *wrong_item = NULL;
-                    cJSON_ArrayForEach(wrong_item, wrong_items_js)
-                    {
-                        if (s_state.server_wrong_count >= QUIZ_MAX_QUESTIONS)
-                        {
-                            break;
-                        }
-
-                        if (!cJSON_IsObject(wrong_item))
-                        {
-                            continue;
-                        }
-
-                        quiz_wrong_item_t *dst = &s_state.server_wrong[s_state.server_wrong_count];
-                        cJSON *question_id_js = cJSON_GetObjectItemCaseSensitive(wrong_item, "question_id");
-                        cJSON *question_no_js = cJSON_GetObjectItemCaseSensitive(wrong_item, "question_no");
-                        cJSON *selected_index_js = cJSON_GetObjectItemCaseSensitive(wrong_item, "selected_index");
-                        cJSON *correct_index_js = cJSON_GetObjectItemCaseSensitive(wrong_item, "correct_index");
-
-                        memset(dst, 0, sizeof(*dst));
-                        if (cJSON_IsString(question_id_js) && question_id_js->valuestring)
-                        {
-                            strncpy(dst->id, question_id_js->valuestring, sizeof(dst->id) - 1);
-                            dst->id[sizeof(dst->id) - 1] = '\0';
-                        }
-                        dst->question_no = cJSON_IsNumber(question_no_js) ? (uint8_t)question_no_js->valueint : (uint8_t)(s_state.server_wrong_count + 1);
-                        dst->your = cJSON_IsNumber(selected_index_js) ? selected_index_js->valueint : -1;
-                        dst->correct = cJSON_IsNumber(correct_index_js) ? correct_index_js->valueint : -1;
-                        s_state.server_wrong_count++;
-                    }
-                }
-
-                if (cJSON_IsNumber(wrong_count_js) && wrong_count_js->valueint != s_state.server_wrong_count)
-                {
-                    ESP_LOGW(TAG, "wrong_count mismatch: api=%d parsed=%d", wrong_count_js->valueint, s_state.server_wrong_count);
-                }
-            }
-            cJSON_Delete(root);
-        }
+        quiz_parse_submit_result_json(resp_json, out_server_result, default_total);
+    }
+    else
+    {
+        quiz_server_result_t server_result;
+        quiz_parse_submit_result_json(resp_json, &server_result, default_total);
+        quiz_apply_server_result(&server_result);
     }
 
     free(resp_json);
@@ -858,6 +1029,7 @@ static bool quiz_parse_questions(const char *json)
 }
 
 
+#if 0
 static bool quiz_download_questions(void)
 {
     char *json = NULL;
@@ -910,6 +1082,7 @@ static bool quiz_download_questions(void)
 
     return true;
 }
+#endif
 
 static char *quiz_build_single_answer_payload(uint8_t question_index, bool is_final_question)
 {
@@ -957,6 +1130,7 @@ static char *quiz_build_submit_payload(void)
     return payload;
 }
 
+#if 0
 static bool quiz_submit_question_answer(uint8_t question_index, bool is_final_question)
 {
     if (question_index >= s_state.question_count)
@@ -1038,6 +1212,7 @@ static bool quiz_submit_question_answer(uint8_t question_index, bool is_final_qu
 
     return false;
 }
+#endif
 
 static void quiz_prepare_local_result(void)
 {
@@ -1065,19 +1240,303 @@ static bool quiz_has_server_result(void)
     return true;
 }
 
+static bool quiz_has_viewable_result(void)
+{
+    if (!s_state.questions_ready || s_state.question_count == 0)
+    {
+        return false;
+    }
+
+    if (!s_state.test_finished || !s_state.final_submit_success)
+    {
+        return false;
+    }
+
+    return quiz_has_server_result();
+}
+
+static void quiz_download_task(void *arg)
+{
+    quiz_download_request_t *req = (quiz_download_request_t *)arg;
+    quiz_download_result_t *result = malloc(sizeof(*result));
+    if (!result)
+    {
+        free(req);
+        app_ui_dispatch(quiz_download_complete, NULL, portMAX_DELAY);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    memset(result, 0, sizeof(*result));
+    result->err = quiz_http_get_questions_for_token(req->auth_token,
+                                                    &result->json,
+                                                    &result->http_status,
+                                                    result->reason,
+                                                    sizeof(result->reason));
+
+    free(req);
+    if (!app_ui_dispatch(quiz_download_complete, result, portMAX_DELAY))
+    {
+        free(result->json);
+        free(result);
+    }
+    vTaskDelete(NULL);
+}
+
+static void quiz_download_complete(void *ctx)
+{
+    quiz_download_result_t *result = (quiz_download_result_t *)ctx;
+    s_download_inflight = false;
+
+    if (!result)
+    {
+        quiz_show_toast_cn("下载失败", 1800);
+        return;
+    }
+
+    if (result->err != ESP_OK || !result->json)
+    {
+        ESP_LOGE(TAG, "Download request failed: err=%s status=%d reason=%s",
+                 esp_err_to_name(result->err), result->http_status, result->reason);
+        if (result->http_status == 401)
+        {
+            quiz_show_toast_cn("会话已过期，请重新登录", 2200);
+        }
+        else if (result->http_status == 403)
+        {
+            quiz_show_toast_cn("无权访问该考试", 2200);
+        }
+        else if (result->http_status == 404)
+        {
+            quiz_show_toast_cn("无可用考试或考试不存在", 2200);
+        }
+        else if (result->http_status == 409)
+        {
+            quiz_show_toast_cn("考试状态冲突或已提交", 2200);
+        }
+        else if (result->reason[0] != '\0')
+        {
+            quiz_show_toast_cn(result->reason, 2200);
+        }
+        else
+        {
+            quiz_show_toast_cn("下载失败", 1800);
+        }
+        free(result->json);
+        free(result);
+        return;
+    }
+
+    ESP_LOGW(TAG, "RAW JSON RECEIVED: %s", result->json);
+    bool ok = quiz_parse_questions(result->json);
+    free(result->json);
+    free(result);
+
+    if (!ok)
+    {
+        ESP_LOGE(TAG, "Parse JSON failed, abort UI");
+        quiz_show_toast_cn("数据无效", 1800);
+    }
+}
+
+static void quiz_submit_task(void *arg)
+{
+    quiz_submit_request_t *req = (quiz_submit_request_t *)arg;
+    quiz_submit_result_t *result = malloc(sizeof(*result));
+    if (!result)
+    {
+        free(req->single_payload);
+        free(req->submit_payload);
+        free(req);
+        app_ui_dispatch(quiz_submit_complete, NULL, portMAX_DELAY);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    memset(result, 0, sizeof(*result));
+    result->question_index = req->question_index;
+    result->answer = req->answer;
+    result->is_final_question = req->is_final_question;
+    result->answer_err = ESP_FAIL;
+    result->final_err = ESP_FAIL;
+    quiz_server_result_reset_to_defaults(&result->server_result, req->question_count);
+
+    for (int attempt = 1; attempt <= APP_SINGLE_ANSWER_RETRY_COUNT; attempt++)
+    {
+        result->answer_err = quiz_http_post_single_answer_for_attempt(req->auth_token,
+                                                                      req->attempt_id,
+                                                                      req->single_payload,
+                                                                      &result->answer_status,
+                                                                      result->answer_reason,
+                                                                      sizeof(result->answer_reason));
+        if (result->answer_err == ESP_OK)
+        {
+            result->attempts_used = attempt;
+            break;
+        }
+
+        if (attempt < APP_SINGLE_ANSWER_RETRY_COUNT)
+        {
+            vTaskDelay(pdMS_TO_TICKS(300));
+        }
+    }
+
+    if (result->answer_err == ESP_OK && req->is_final_question)
+    {
+        result->final_err = quiz_http_post_results_for_attempt(req->auth_token,
+                                                               req->attempt_id,
+                                                               req->submit_payload,
+                                                               &result->final_status,
+                                                               result->final_reason,
+                                                               sizeof(result->final_reason),
+                                                               &result->server_result,
+                                                               req->question_count);
+    }
+
+    free(req->single_payload);
+    free(req->submit_payload);
+    free(req);
+
+    if (!app_ui_dispatch(quiz_submit_complete, result, portMAX_DELAY))
+    {
+        free(result);
+    }
+    vTaskDelete(NULL);
+}
+
+static void quiz_submit_complete(void *ctx)
+{
+    quiz_submit_result_t *result = (quiz_submit_result_t *)ctx;
+
+    if (!result)
+    {
+        quiz_set_submit_loading(false);
+        quiz_show_toast_cn("保存失败，请重试", 2200);
+        return;
+    }
+
+    if (result->answer_err != ESP_OK)
+    {
+        if (result->answer_status == 401)
+        {
+            quiz_show_toast_cn("会话已过期，请重新登录", 2200);
+        }
+        else if (result->answer_status == 403)
+        {
+            quiz_show_toast_cn("无权提交答案", 2200);
+        }
+        else if (result->answer_status == 404)
+        {
+            quiz_show_toast_cn("作答或题目不存在", 2200);
+        }
+        else if (result->answer_status == 409)
+        {
+            quiz_show_toast_cn("作答已关闭或已提交", 2200);
+        }
+        else if (result->answer_reason[0] != '\0')
+        {
+            quiz_show_toast_cn(result->answer_reason, 2200);
+        }
+        else
+        {
+            quiz_show_toast_cn("保存失败，请重试", 2200);
+        }
+        quiz_set_submit_loading(false);
+        free(result);
+        return;
+    }
+
+    s_state.submitted_answers[result->question_index] = result->answer;
+
+    if (!result->is_final_question)
+    {
+        if (result->attempts_used > 1)
+        {
+            quiz_show_toast_cn("重试后已保存", 1600);
+        }
+        s_state.current_question++;
+        quiz_load_question(s_state.current_question);
+        free(result);
+        return;
+    }
+
+    if (result->final_err == ESP_OK && result->server_result.has_result)
+    {
+        quiz_apply_server_result(&result->server_result);
+        s_state.test_finished = true;
+        s_state.final_submit_success = true;
+        quiz_show_toast_cn("已完成", 1800);
+        quiz_show_results_screen();
+    }
+    else if (result->final_err == ESP_OK)
+    {
+        quiz_reset_server_result();
+        quiz_show_toast_cn("已提交，但未返回结果", 2200);
+    }
+    else if (result->final_status == 401)
+    {
+        quiz_show_toast_cn("会话已过期，请重新登录", 2200);
+    }
+    else if (result->final_status == 403)
+    {
+        quiz_show_toast_cn("无权提交", 2200);
+    }
+    else if (result->final_status == 404)
+    {
+        quiz_show_toast_cn("作答不存在", 2200);
+    }
+    else if (result->final_status == 409)
+    {
+        quiz_show_toast_cn("试卷已提交，但未返回结果", 2200);
+    }
+    else if (result->final_reason[0] != '\0')
+    {
+        quiz_show_toast_cn(result->final_reason, 2200);
+    }
+    else
+    {
+        quiz_show_toast_cn("已保存作答，但最终交卷失败", 2200);
+    }
+
+    quiz_set_submit_loading(false);
+    free(result);
+}
+
 static void quiz_handle_download(lv_event_t *e)
 {
     LV_UNUSED(e);
-    if (!quiz_download_questions())
+    if (s_download_inflight)
     {
-        ESP_LOGE(TAG, "Download failed, not entering question screen");
         return;
+    }
+
+    quiz_download_request_t *req = malloc(sizeof(*req));
+    if (!req)
+    {
+        quiz_show_toast_cn("内存不足", 1800);
+        return;
+    }
+
+    memset(req, 0, sizeof(*req));
+    strncpy(req->auth_token, s_auth_token, sizeof(req->auth_token) - 1);
+    s_download_inflight = true;
+    if (xTaskCreate(quiz_download_task, "quiz_download", 8 * 1024, req, 4, NULL) != pdPASS)
+    {
+        s_download_inflight = false;
+        free(req);
+        quiz_show_toast_cn("下载失败", 1800);
     }
 }
 
 static void quiz_handle_start_test(lv_event_t *e)
 {
     LV_UNUSED(e);
+
+    if (s_download_inflight)
+    {
+        quiz_show_toast_cn("正在下载题目", 1600);
+        return;
+    }
 
     if (!s_state.questions_ready)
     {
@@ -1104,6 +1563,18 @@ static void quiz_handle_start_test(lv_event_t *e)
 static void quiz_handle_view_results(lv_event_t *e)
 {
     LV_UNUSED(e);
+    if (!s_state.questions_ready || s_state.question_count == 0)
+    {
+        quiz_show_toast_cn("请先下载题目", 2000);
+        return;
+    }
+
+    if (!quiz_has_viewable_result())
+    {
+        quiz_show_toast_cn("暂无可查看结果", 2000);
+        return;
+    }
+
     if (!s_state.test_finished)
     {
         quiz_show_toast_cn("尚未进行测试", 2000);
@@ -1431,7 +1902,6 @@ static void quiz_build_result_screen(void)
 
     quiz_create_result_screen();
 
-    s_result_all_good_label = NULL;
     s_result_wrong_row_used = 0;
     memset(s_result_wrong_rows, 0, sizeof(s_result_wrong_rows));
 
@@ -1625,8 +2095,6 @@ static void quiz_build_result_screen(void)
     quiz_set_cn_font_for_label(wrong_list_title);
     lv_obj_set_style_text_color(wrong_list_title, lv_color_hex(0x111111), 0);
 
-    bool has_wrong = false;
-
     for (uint8_t i = 0; i < s_state.server_wrong_count; i++)
     {
         const quiz_wrong_item_t *wrong = &s_state.server_wrong[i];
@@ -1634,19 +2102,24 @@ static void quiz_build_result_screen(void)
         char ans_c  = (wrong->correct >= 0 && wrong->correct < QUIZ_OPTION_COUNT) ? ('A' + wrong->correct) : '-';
 
         quiz_add_wrong_row(wrong->question_no > 0 ? wrong->question_no : (uint8_t)(i + 1), your_c, ans_c);
-        has_wrong = true;
-    }
-
-
-    if (!has_wrong && wrong_cnt == 0 && s_result_all_good_label)
-    {
-        lv_obj_clear_flag(s_result_all_good_label, LV_OBJ_FLAG_HIDDEN);
     }
 }
 
 static void quiz_show_results_screen(void)
 {
+    if (!quiz_has_viewable_result())
+    {
+        ESP_LOGW(TAG, "Ignore result screen request without valid result data");
+        return;
+    }
+
     quiz_build_result_screen();
+    if (!s_result_screen)
+    {
+        ESP_LOGE(TAG, "Result screen is unavailable");
+        return;
+    }
+
     lv_scr_load(s_result_screen);
 
     /* 进入结果界面时自动滚动到顶部 */
@@ -1659,6 +2132,11 @@ static void quiz_show_results_screen(void)
 static void quiz_handle_option(lv_event_t *e)
 {
     if (lv_event_get_code(e) != LV_EVENT_CLICKED)
+    {
+        return;
+    }
+
+    if (s_state.submit_inflight)
     {
         return;
     }
@@ -1826,6 +2304,7 @@ static void quiz_load_question(uint8_t index)
     }
 }
 
+#if 0
 static void quiz_finish_and_upload(void)
 {
     s_state.test_finished = false;
@@ -1892,6 +2371,7 @@ static void quiz_finish_and_upload(void)
 }
 
 /* Toast 提示的隐藏回调函数：由定时器触发，隐藏提示消息 */
+#endif
 static void quiz_hide_toast_cb(lv_timer_t *t)
 {
     LV_UNUSED(t);
@@ -1902,6 +2382,7 @@ static void quiz_hide_toast_cb(lv_timer_t *t)
 }
 
 /* 返回首页按钮的回调函数：将屏幕切换回主界面 */
+#if 0
 static void quiz_back_to_home(lv_event_t *e)
 {
     LV_UNUSED(e);
@@ -1910,6 +2391,7 @@ static void quiz_back_to_home(lv_event_t *e)
         lv_scr_load(s_home_screen);
     }
 }
+#endif
 
 static void quiz_handle_submit(lv_event_t *e)
 {
@@ -1933,22 +2415,56 @@ static void quiz_handle_submit(lv_event_t *e)
 
     bool is_final_question = (idx + 1 >= s_state.question_count);
 
-    quiz_set_submit_loading(true);
-    if (!quiz_submit_question_answer(idx, is_final_question))
+    char *single_payload = quiz_build_single_answer_payload(idx, is_final_question);
+    if (!single_payload)
     {
-        quiz_set_submit_loading(false);
+        quiz_show_toast_cn("内存不足", 1800);
         return;
     }
 
+    char *submit_payload = NULL;
     if (is_final_question)
     {
-        quiz_finish_and_upload();
-        quiz_set_submit_loading(false);
+        quiz_prepare_local_result();
+        s_state.test_finished = false;
+        s_state.final_submit_success = false;
+        submit_payload = quiz_build_submit_payload();
+        if (!submit_payload)
+        {
+            free(single_payload);
+            quiz_show_toast_cn("内存不足", 1800);
+            return;
+        }
+    }
+
+    quiz_submit_request_t *req = malloc(sizeof(*req));
+    if (!req)
+    {
+        free(single_payload);
+        free(submit_payload);
+        quiz_show_toast_cn("内存不足", 1800);
         return;
     }
 
-    s_state.current_question++;
-    quiz_load_question(s_state.current_question);
+    memset(req, 0, sizeof(*req));
+    req->question_index = idx;
+    req->answer = s_state.answers[idx];
+    req->question_count = s_state.question_count;
+    req->is_final_question = is_final_question;
+    strncpy(req->auth_token, s_auth_token, sizeof(req->auth_token) - 1);
+    strncpy(req->attempt_id, s_attempt_id, sizeof(req->attempt_id) - 1);
+    req->single_payload = single_payload;
+    req->submit_payload = submit_payload;
+
+    quiz_set_submit_loading(true);
+    if (xTaskCreate(quiz_submit_task, "quiz_submit", 10 * 1024, req, 4, NULL) != pdPASS)
+    {
+        free(req->single_payload);
+        free(req->submit_payload);
+        free(req);
+        quiz_set_submit_loading(false);
+        quiz_show_toast_cn("保存失败，请重试", 2200);
+    }
 }
 
 void quiz_app_create_ui(void)

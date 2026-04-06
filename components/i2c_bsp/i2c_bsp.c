@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include "i2c_bsp.h"
 #include "user_config.h"
 #include "freertos/FreeRTOS.h"
@@ -12,6 +13,21 @@ i2c_master_dev_handle_t imu_dev_handle = NULL;
 
 static uint32_t i2c_data_pdMS_TICKS = 0;
 static uint32_t i2c_done_pdMS_TICKS = 0;
+
+static i2c_master_bus_handle_t i2c_get_bus_for_device(i2c_master_dev_handle_t dev_handle)
+{
+  if (dev_handle == disp_touch_dev_handle)
+  {
+    return user_i2c_port1_handle;
+  }
+
+  if (dev_handle == rtc_dev_handle || dev_handle == imu_dev_handle)
+  {
+    return user_i2c_port0_handle;
+  }
+
+  return NULL;
+}
 
 
 void i2c_master_Init(void)
@@ -52,11 +68,17 @@ void i2c_master_Init(void)
 
 }
 
-uint8_t i2c_writr_buff(i2c_master_dev_handle_t dev_handle,int reg,uint8_t *buf,uint8_t len)
+esp_err_t i2c_writr_buff(i2c_master_dev_handle_t dev_handle,int reg,uint8_t *buf,uint8_t len)
 {
-  uint8_t ret;
+  esp_err_t ret;
   uint8_t *pbuf = NULL;
-  ret = i2c_master_bus_wait_all_done(user_i2c_port0_handle,i2c_done_pdMS_TICKS);
+  i2c_master_bus_handle_t bus_handle = i2c_get_bus_for_device(dev_handle);
+  if (!bus_handle)
+  {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  ret = i2c_master_bus_wait_all_done(bus_handle,i2c_done_pdMS_TICKS);
   if(ret != ESP_OK)
   return ret;
   if(reg == -1)
@@ -66,6 +88,10 @@ uint8_t i2c_writr_buff(i2c_master_dev_handle_t dev_handle,int reg,uint8_t *buf,u
   else
   {
     pbuf = (uint8_t*)malloc(len+1);
+    if (!pbuf)
+    {
+      return ESP_ERR_NO_MEM;
+    }
     pbuf[0] = reg;
     for(uint8_t i = 0; i<len; i++)
     {
@@ -77,20 +103,32 @@ uint8_t i2c_writr_buff(i2c_master_dev_handle_t dev_handle,int reg,uint8_t *buf,u
   }
   return ret;
 }
-uint8_t i2c_master_write_read_dev(i2c_master_dev_handle_t dev_handle,uint8_t *writeBuf,uint8_t writeLen,uint8_t *readBuf,uint8_t readLen)
+esp_err_t i2c_master_write_read_dev(i2c_master_dev_handle_t dev_handle,uint8_t *writeBuf,uint8_t writeLen,uint8_t *readBuf,uint8_t readLen)
 {
-  uint8_t ret;
-  ret = i2c_master_bus_wait_all_done(user_i2c_port0_handle,i2c_done_pdMS_TICKS);
+  esp_err_t ret;
+  i2c_master_bus_handle_t bus_handle = i2c_get_bus_for_device(dev_handle);
+  if (!bus_handle)
+  {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  ret = i2c_master_bus_wait_all_done(bus_handle,i2c_done_pdMS_TICKS);
   if(ret != ESP_OK)
   return ret;
   ret = i2c_master_transmit_receive(dev_handle,writeBuf,writeLen,readBuf,readLen,i2c_data_pdMS_TICKS);
   return ret;
 }
-uint8_t i2c_read_buff(i2c_master_dev_handle_t dev_handle,int reg,uint8_t *buf,uint8_t len)
+esp_err_t i2c_read_buff(i2c_master_dev_handle_t dev_handle,int reg,uint8_t *buf,uint8_t len)
 {
-  uint8_t ret;
+  esp_err_t ret;
   uint8_t addr = 0;
-  ret = i2c_master_bus_wait_all_done(user_i2c_port0_handle,i2c_done_pdMS_TICKS);
+  i2c_master_bus_handle_t bus_handle = i2c_get_bus_for_device(dev_handle);
+  if (!bus_handle)
+  {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  ret = i2c_master_bus_wait_all_done(bus_handle,i2c_done_pdMS_TICKS);
   if(ret != ESP_OK)
   return ret;
   if( reg == -1 )
@@ -101,10 +139,16 @@ uint8_t i2c_read_buff(i2c_master_dev_handle_t dev_handle,int reg,uint8_t *buf,ui
 }
 
 
-uint8_t i2c_master_touch_write_read(i2c_master_dev_handle_t dev_handle,uint8_t *writeBuf,uint8_t writeLen,uint8_t *readBuf,uint8_t readLen)
+esp_err_t i2c_master_touch_write_read(i2c_master_dev_handle_t dev_handle,uint8_t *writeBuf,uint8_t writeLen,uint8_t *readBuf,uint8_t readLen)
 {
-  uint8_t ret;
-  ret = i2c_master_bus_wait_all_done(user_i2c_port1_handle,i2c_done_pdMS_TICKS);
+  esp_err_t ret;
+  i2c_master_bus_handle_t bus_handle = i2c_get_bus_for_device(dev_handle);
+  if (!bus_handle)
+  {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  ret = i2c_master_bus_wait_all_done(bus_handle,i2c_done_pdMS_TICKS);
   if(ret != ESP_OK)
   return ret;
   ret = i2c_master_transmit_receive(dev_handle,writeBuf,writeLen,readBuf,readLen,i2c_data_pdMS_TICKS);
