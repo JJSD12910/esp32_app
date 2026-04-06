@@ -262,6 +262,11 @@ static void quiz_show_toast(const char *text, uint32_t duration_ms)
     if (!s_toast_label)
     {
         s_toast_label = lv_label_create(lv_layer_top());
+        if (!s_toast_label)
+        {
+            ESP_LOGE(TAG, "Failed to create toast label");
+            return;
+        }
         lv_obj_set_style_bg_opa(s_toast_label, LV_OPA_70, LV_PART_MAIN);
         lv_obj_set_style_bg_color(s_toast_label, lv_color_black(), LV_PART_MAIN);
         lv_obj_set_style_text_color(s_toast_label, lv_color_white(), LV_PART_MAIN);
@@ -277,6 +282,11 @@ static void quiz_show_toast(const char *text, uint32_t duration_ms)
     if (!s_toast_timer)
     {
         s_toast_timer = lv_timer_create(quiz_hide_toast_cb, duration_ms, NULL);
+        if (!s_toast_timer)
+        {
+            ESP_LOGE(TAG, "Failed to create toast timer");
+            return;
+        }
     }
     else
     {
@@ -1873,12 +1883,24 @@ static void quiz_create_result_screen(void)
     }
 
     s_result_screen = lv_obj_create(NULL);
+    if (!s_result_screen)
+    {
+        ESP_LOGE(TAG, "Failed to create result screen");
+        return;
+    }
     lv_obj_set_size(s_result_screen, 640, 172);
     lv_obj_clear_flag(s_result_screen, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_color(s_result_screen, lv_color_white(), 0);
     lv_obj_set_style_pad_all(s_result_screen, 0, 0);
 
     s_result_scroll = lv_obj_create(s_result_screen);
+    if (!s_result_scroll)
+    {
+        ESP_LOGE(TAG, "Failed to create result scroll area");
+        lv_obj_del(s_result_screen);
+        s_result_screen = NULL;
+        return;
+    }
     lv_obj_set_size(s_result_scroll, 640, 172);
     lv_obj_align(s_result_scroll, LV_ALIGN_TOP_MID, 0, 0);
     lv_obj_set_scroll_dir(s_result_scroll, LV_DIR_VER);
@@ -2485,6 +2507,12 @@ void quiz_app_create_ui(void)
     quiz_create_home_screen();
     quiz_build_test_screen();
     quiz_create_result_screen();
+
+    if (!s_home_screen || !s_test_screen || !s_result_screen)
+    {
+        ESP_LOGE(TAG, "Quiz UI is incomplete");
+        return;
+    }
 
     lv_scr_load(s_home_screen);
 }

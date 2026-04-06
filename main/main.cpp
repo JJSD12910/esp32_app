@@ -218,6 +218,13 @@ static esp_err_t tca9554_init(void)
 
 static void example_button_pwr_task(void* arg)
 {
+    if (!pwr_groups)
+    {
+        ESP_LOGE(TAG, "Power button event group is not ready");
+        vTaskDelete(NULL);
+        return;
+    }
+
     for (;;)
     {
         EventBits_t even = xEventGroupWaitBits(pwr_groups, set_bit_all, pdTRUE, pdFALSE, pdMS_TO_TICKS(2 * 1000));
@@ -254,7 +261,11 @@ extern "C" void app_main(void)
     // 如果配置为90度旋转显示，分配额外的旋转缓冲区
     #if (Rotated == USER_DISP_ROT_90)
     rotat_ptr = (uint16_t*)heap_caps_malloc(EXAMPLE_LCD_H_RES * EXAMPLE_LCD_V_RES * sizeof(uint16_t), MALLOC_CAP_SPIRAM);
-    assert(rotat_ptr);
+    if (!rotat_ptr)
+    {
+        ESP_LOGE(TAG, "Failed to allocate rotation buffer");
+        return;
+    }
     #endif
     
     // 创建LVGL刷新信号量
@@ -281,8 +292,14 @@ extern "C" void app_main(void)
         io_expander = NULL;
     }
     button_Init();
-    xTaskCreatePinnedToCore(example_button_pwr_task, "example_button_pwr_task", 4 * 1024, NULL, 2, NULL, 1);
-    xTaskCreatePinnedToCore(power_Test, "power_Test", 4 * 1024, NULL, 3, NULL, 1);
+    if (xTaskCreatePinnedToCore(example_button_pwr_task, "example_button_pwr_task", 4 * 1024, NULL, 2, NULL, 1) != pdPASS)
+    {
+        ESP_LOGE(TAG, "Failed to create power button task");
+    }
+    if (xTaskCreatePinnedToCore(power_Test, "power_Test", 4 * 1024, NULL, 3, NULL, 1) != pdPASS)
+    {
+        ESP_LOGE(TAG, "Failed to create power state task");
+    }
 
     
     // 创建LVGL显示缓冲区和显示驱动结构
@@ -364,13 +381,30 @@ extern "C" void app_main(void)
     
     // 分配LVGL DMA缓冲区（从DMA能力内存）
     lvgl_dma_buf = (uint16_t *)heap_caps_malloc(LVGL_DMA_BUFF_LEN, MALLOC_CAP_DMA);
-    assert(lvgl_dma_buf);
+    if (!lvgl_dma_buf)
+    {
+        ESP_LOGE(TAG, "Failed to allocate LVGL DMA buffer");
+        return;
+    }
     
     // 分配LVGL显示缓冲区（从SPIRAM）
     lv_color_t *buffer_1 = (lv_color_t *)heap_caps_malloc(LVGL_SPIRAM_BUFF_LEN, MALLOC_CAP_SPIRAM);
     lv_color_t *buffer_2 = (lv_color_t *)heap_caps_malloc(LVGL_SPIRAM_BUFF_LEN, MALLOC_CAP_SPIRAM);
-    assert(buffer_1);
-    assert(buffer_2);
+    if (!buffer_1 || !buffer_2)
+    {
+        ESP_LOGE(TAG, "Failed to allocate LVGL draw buffers");
+        if (buffer_1)
+        {
+            heap_caps_free(buffer_1);
+        }
+        if (buffer_2)
+        {
+            heap_caps_free(buffer_2);
+        }
+        heap_caps_free(lvgl_dma_buf);
+        lvgl_dma_buf = NULL;
+        return;
+    }
     
     // 初始化LVGL显示缓冲区
     lv_disp_draw_buf_init(&disp_buf, buffer_1, buffer_2, EXAMPLE_LCD_H_RES * EXAMPLE_LCD_V_RES);
@@ -407,13 +441,24 @@ extern "C" void app_main(void)
 
     // 创建LVGL互斥锁，保护并发访问
     lvgl_mux = xSemaphoreCreateMutex();
-    assert(lvgl_mux);
+    if (!lvgl_mux)
+    {
+        ESP_LOGE(TAG, "Failed to create LVGL mutex");
+        return;
+    }
     
     // 创建LVGL主任务（固定在CPU 0上运行）
-    xTaskCreatePinnedToCore(example_lvgl_port_task, "LVGL", 4000, NULL, 4, NULL, 0);
+    if (xTaskCreatePinnedToCore(example_lvgl_port_task, "LVGL", 4000, NULL, 4, NULL, 0) != pdPASS)
+    {
+        ESP_LOGE(TAG, "Failed to create LVGL task");
+        return;
+    }
     
     // 创建背光控制任务（固定在CPU 0上运行）
-    xTaskCreatePinnedToCore(example_backlight_loop_task, "example_backlight_loop_task", 4 * 1024, NULL, 2, NULL, 0); 
+    if (xTaskCreatePinnedToCore(example_backlight_loop_task, "example_backlight_loop_task", 4 * 1024, NULL, 2, NULL, 0) != pdPASS)
+    {
+        ESP_LOGE(TAG, "Failed to create backlight task");
+    }
     
     // Launch application flow (login -> quiz)
     if (example_lvgl_lock(-1))
@@ -502,6 +547,10 @@ static void example_lvgl_flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_
  */
 static bool example_lvgl_lock(int timeout_ms)
 {
+    if (!lvgl_mux)
+    {
+        return false;
+    }
     // 转换超时时间为FreeRTOS tick
     const TickType_t timeout_ticks = (timeout_ms == -1) ? portMAX_DELAY : pdMS_TO_TICKS(timeout_ms);
     return xSemaphoreTake(lvgl_mux, timeout_ticks) == pdTRUE;       
@@ -512,7 +561,11 @@ static bool example_lvgl_lock(int timeout_ms)
  */
 static void example_lvgl_unlock(void)
 {
-    assert(lvgl_mux && "bsp_display_start must be called first");
+    if (!lvgl_mux)
+    {
+        ESP_LOGE(TAG, "LVGL mutex is not ready");
+        return;
+    }
     xSemaphoreGive(lvgl_mux);
 }
 

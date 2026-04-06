@@ -755,6 +755,11 @@ void login_app_show(void)
     {
         login_app_build_ui();
     }
+    if (!s_login_screen)
+    {
+        ESP_LOGE(TAG, "Login UI is unavailable");
+        return;
+    }
     lv_scr_load(s_login_screen);
     login_app_update_status("输入账号和密码");
 }
